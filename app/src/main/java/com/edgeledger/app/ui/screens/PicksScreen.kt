@@ -132,7 +132,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
 
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricTile(if (isPaper) "Virtual Bal" else "Balance", "$${(baseBalance + netPnl).roundToInt()}", null, Modifier.weight(1f))
+                MetricTile(if (isPaper) "Paper Bal" else "Balance", "$${(baseBalance + netPnl).roundToInt()}", null, Modifier.weight(1f))
                 MetricTile("Total Profit", "${if (netPnl >= 0) "+" else ""}$${netPnl.roundToInt()}", avgClv?.let { "CLV ${if (it >= 0) "+" else ""}${String.format("%.1f", it)}%" }, Modifier.weight(1f))
                 MetricTile("Win Rate", "$winRate%", "$won/$settled settled", Modifier.weight(1f))
             }
@@ -249,6 +249,6 @@ fun PicksScreen(app: EdgeLedgerApp) {
             }
         }
 
-        item { Spacer(Modifier.height(20.dp)) }
+        item { Spacer(Modifier.height(88.dp)) }
     }
 }

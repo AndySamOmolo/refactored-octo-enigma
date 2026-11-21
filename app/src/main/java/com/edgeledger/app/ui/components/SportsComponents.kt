@@ -34,7 +34,13 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import coil.ImageLoader
+import coil.compose.SubcomposeAsyncImage
+import coil.decode.SvgDecoder
+import coil.request.ImageRequest
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -47,6 +53,13 @@ import com.edgeledger.app.engine.FeatureDriver
 import com.edgeledger.app.engine.LineMovePoint
 import com.edgeledger.app.engine.PlayerPropPrediction
 import com.edgeledger.app.theme.HapticLevel
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
@@ -137,6 +150,23 @@ fun shortTeamName(fullName: String): String {
         "philadelphia phillies" to "Phillies",
         "houston astros" to "Astros",
         "boston red sox" to "Red Sox",
+        "las vegas raiders" to "Raiders",
+        "washington commanders" to "Commanders",
+        "jacksonville jaguars" to "Jaguars",
+        "carolina panthers" to "Panthers",
+        "seattle seahawks" to "Seahawks",
+        "minnesota vikings" to "Vikings",
+        "cincinnati bengals" to "Bengals",
+        "cleveland browns" to "Browns",
+        "pittsburgh steelers" to "Steelers",
+        "houston texans" to "Texans",
+        "indianapolis colts" to "Colts",
+        "tennessee titans" to "Titans",
+        "denver broncos" to "Broncos",
+        "chicago bears" to "Bears",
+        "atlanta falcons" to "Falcons",
+        "new orleans saints" to "Saints",
+        "miami dolphins" to "Dolphins",
     )
     known[clean.lowercase(Locale.US)]?.let { return it }
     if (clean.length <= 13) return clean
@@ -159,7 +189,13 @@ fun tabularStyle(sizeSp: Float, weight: FontWeight = FontWeight.Bold, color: Col
 }
 
 @Composable
-fun scaledSp(baseSp: Float) = (baseSp * AppTheme.tokens.fontScale).sp
+fun scaledSp(baseSp: Float) = (baseSp * AppTheme.tokens.fontScale).coerceAtLeast(11.5f).sp
+
+fun formatLocalKickoff(kickoffIso: String): String = runCatching {
+    val instant = Instant.parse(kickoffIso)
+    val local = instant.atZone(ZoneId.systemDefault())
+    local.format(DateTimeFormatter.ofPattern("MMM d · HH:mm", Locale.US))
+}.getOrElse { kickoffIso.take(16).replace("T", " · ") }
 
 @Composable
 fun SectionCard(
@@ -270,7 +306,11 @@ fun StatusBadge(
 }
 
 @Composable
-fun TeamAvatar(teamName: String, size: Dp = 40.dp) {
+fun TeamAvatar(
+    teamName: String,
+    size: Dp = 40.dp,
+    logoUrl: String? = null,
+) {
     val words = teamName.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
     val initials = when {
         words.isEmpty() -> "??"
@@ -278,21 +318,58 @@ fun TeamAvatar(teamName: String, size: Dp = 40.dp) {
         else -> "${words[0][0]}${words[1][0]}".uppercase()
     }
     val color = TEAM_COLORS[abs(teamName.lowercase().hashCode()) % TEAM_COLORS.size]
+    val c = AppTheme.tokens.colors
 
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(color)
-            .border(1.5.dp, Color.White.copy(alpha = 0.25f), CircleShape),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = initials,
-            color = Color.White,
-            fontSize = (size.value * 0.36f).sp,
-            fontWeight = FontWeight.ExtraBold,
-        )
+    @Composable
+    fun InitialsFallback() {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(color)
+                .border(1.5.dp, Color.White.copy(alpha = 0.25f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = initials,
+                color = Color.White,
+                fontSize = (size.value * 0.36f).sp,
+                fontWeight = FontWeight.ExtraBold,
+            )
+        }
+    }
+
+    if (logoUrl.isNullOrBlank()) {
+        InitialsFallback()
+    } else {
+        val context = LocalContext.current
+        val imageLoader = remember(context) {
+            ImageLoader.Builder(context)
+                .components { add(SvgDecoder.Factory()) }
+                .crossfade(true)
+                .build()
+        }
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(c.surfaceRaised)
+                .border(1.dp, c.border, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            SubcomposeAsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(logoUrl)
+                    .crossfade(true)
+                    .build(),
+                imageLoader = imageLoader,
+                contentDescription = "$teamName logo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(size * 0.80f),
+                loading = { InitialsFallback() },
+                error = { InitialsFallback() },
+            )
+        }
     }
 }
 
@@ -366,19 +443,20 @@ fun FormDots(results: List<String>, alignEnd: Boolean = false) {
         padded.forEach { res ->
             val bg = when (res) {
                 "W" -> c.win
-                "D" -> c.draw
+                "D", "OTL" -> c.draw
                 "L" -> c.loss
                 else -> c.surfaceRaised
             }
             val fg = when (res) {
                 "W" -> c.onWin
-                "D" -> c.onDraw
+                "D", "OTL" -> c.onDraw
                 "L" -> c.onLoss
                 else -> c.textMuted
             }
             Box(
                 modifier = Modifier
-                    .size(20.dp)
+                    .height(20.dp)
+                    .width(if (res.length > 1) 26.dp else 20.dp)
                     .clip(t.shapes.extraSmall)
                     .background(bg),
                 contentAlignment = Alignment.Center,
@@ -624,11 +702,12 @@ fun PlayerPropCard(
 ) {
     val t = AppTheme.tokens
     val c = t.colors
+    var expanded by remember(prop.id) { mutableStateOf(false) }
     Surface(
         color = c.surfaceRaised,
         shape = t.shapes.medium,
         border = BorderStroke(0.75.dp, c.border.copy(alpha = 0.65f)),
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
@@ -645,7 +724,7 @@ fun PlayerPropCard(
                     "Projected ${formatStatValue(prop.projectedValue, 1)} (80% range ${formatStatValue(prop.rangeLow, 1)}–${formatStatValue(prop.rangeHigh, 1)}) · ${prop.overChancePct}% chance",
                     style = tabularStyle(11.5f, FontWeight.SemiBold, c.textSecondary),
                 )
-                Text(prop.plainReason, color = c.textMuted, fontSize = scaledSp(11.5f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(prop.plainReason, color = c.textMuted, fontSize = scaledSp(11.5f), maxLines = if (expanded) 8 else 2, overflow = TextOverflow.Ellipsis)
             }
             Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusBadge("${prop.overChancePct}%", c.win, c.winDim)

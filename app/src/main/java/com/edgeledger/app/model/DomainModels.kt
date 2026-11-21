@@ -123,6 +123,7 @@ data class TeamProfile(
     val avgAces: Double = 6.5,
     val avgDoubleFaults: Double = 2.4,
     val firstServeWinPct: Double = 73.0,
+    val logoUrl: String? = null,
 )
 
 @Serializable
@@ -262,6 +263,8 @@ data class MatchFixture(
     val homeRangeLowPct: Int = 0,
     val homeRangeHighPct: Int = 0,
     val marketHoldPct: Double = 0.0,
+    val homeLogoUrl: String? = null,
+    val awayLogoUrl: String? = null,
 )
 
 @Serializable
@@ -280,6 +283,7 @@ data class LeagueTrackRecord(
     val accuracyScore: Int, // 0..100 plain-English score
     val beatsSimpleGuess: Boolean,
     val simulatedProfitPct: Double,
+    val hasGradedOdds: Boolean = true,
     val reliabilityBins: List<ReliabilityBin>,
 )
 
@@ -300,4 +304,12 @@ data class PredictionMarketQuote(
     val question: String,
     val yesProbPct: Int,
     val noProbPct: Int,
+)
+
+@Serializable
+data class LivePlayerEntry(
+    val name: String,
+    val position: String,
+    val statCategory: String = "",
+    val statValue: Double? = null,
 )

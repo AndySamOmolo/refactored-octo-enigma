@@ -14,8 +14,8 @@ android {
         applicationId = "com.edgeledger.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "6.2.0"
+        versionCode = 8
+        versionName = "7.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
@@ -97,6 +97,10 @@ dependencies {
     // Material 3 Home-Screen Widget (Jetpack Glance)
     implementation("androidx.glance:glance-appwidget:1.1.1")
     implementation("androidx.glance:glance-material3:1.1.1")
+
+    // Live Team Logo Rendering & Offline Disk Cache (PNG + SVG)
+    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-svg:2.7.0")
 
     // Networking & JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

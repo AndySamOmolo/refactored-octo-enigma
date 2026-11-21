@@ -50,6 +50,7 @@ import com.edgeledger.app.model.Sport
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.theme.FixtureLayoutMode
 import com.edgeledger.app.ui.components.FormDots
+import com.edgeledger.app.ui.components.formatLocalKickoff
 import com.edgeledger.app.ui.components.ProbBar
 import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatusBadge
@@ -134,7 +135,7 @@ fun GamesScreen(
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
                             text = when {
-                                snapshot.isSeedData -> "Ready Offline · Starter Data Loaded"
+                                snapshot.fixtures.isEmpty() -> "Tap Update to Sync Live Datasets"
                                 daysOld == 0L -> "Ready Offline · Updated Today"
                                 else -> "Ready Offline · Updated ${daysOld}d ago"
                             },
@@ -258,7 +259,7 @@ fun GamesScreen(
                     }
                 }
             }
-            item { Spacer(Modifier.height(16.dp)) }
+            item { Spacer(Modifier.height(88.dp)) }
         }
     }
 }
@@ -276,7 +277,7 @@ private fun CompactFixtureRow(
     SectionCard(modifier = Modifier.clickable(onClick = onClick)) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("${fixture.leagueName} · ${fixture.kickoffIso.take(16).replace("T", " ")}", color = c.accent, fontSize = scaledSp(11f), fontWeight = FontWeight.Bold)
+                Text("${fixture.leagueName} · ${formatLocalKickoff(fixture.kickoffIso)}", color = c.accent, fontSize = scaledSp(11f), fontWeight = FontWeight.Bold)
                 Text("${fixture.homeTeam} vs ${fixture.awayTeam}", color = c.text, fontSize = scaledSp(14f), fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${fixture.playerProps.size} player props · Top: ${fixture.markets.topPicks.firstOrNull()?.label ?: "—"}", color = c.textMuted, fontSize = scaledSp(11.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -326,7 +327,7 @@ private fun FixtureCard(
             )
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = fixture.kickoffIso.take(16).replace("T", " · "),
+                    text = formatLocalKickoff(fixture.kickoffIso),
                     color = c.textMuted,
                     fontSize = scaledSp(11f),
                     fontWeight = FontWeight.Medium,
@@ -348,7 +349,7 @@ private fun FixtureCard(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TeamAvatar(fixture.homeTeam, size = 38.dp)
+                TeamAvatar(fixture.homeTeam, size = 38.dp, logoUrl = fixture.homeLogoUrl)
                 Column {
                     Text(fixture.homeTeam, color = c.text, fontSize = scaledSp(13.5f), fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text("Power $homePower/99", color = c.textMuted, fontSize = scaledSp(11f))
@@ -360,7 +361,7 @@ private fun FixtureCard(
                     Text(fixture.awayTeam, color = c.text, fontSize = scaledSp(13.5f), fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text("Power $awayPower/99", color = c.textMuted, fontSize = scaledSp(11f))
                 }
-                TeamAvatar(fixture.awayTeam, size = 38.dp)
+                TeamAvatar(fixture.awayTeam, size = 38.dp, logoUrl = fixture.awayLogoUrl)
             }
         }
 

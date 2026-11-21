@@ -1,5 +1,6 @@
 package com.edgeledger.app.engine
 
+import com.edgeledger.app.model.LivePlayerEntry
 import com.edgeledger.app.model.Sport
 import kotlinx.serialization.Serializable
 import kotlin.math.abs
@@ -78,9 +79,12 @@ object PlayerPropsEngine {
         projectedAwayScore: Double,
         homePower: Int,
         awayPower: Int,
+        liveHomePlayers: List<LivePlayerEntry> = emptyList(),
+        liveAwayPlayers: List<LivePlayerEntry> = emptyList(),
     ): List<PlayerPropPrediction> {
-        val homeSpecs = resolveTeamProps(sport, homeTeam, isHome = true)
-        val awaySpecs = resolveTeamProps(sport, awayTeam, isHome = false)
+        // 100% Live Dataset Policy: only generate player props from live synced rosters/leaders
+        val homeSpecs = buildLivePropSpecs(sport, liveHomePlayers)
+        val awaySpecs = buildLivePropSpecs(sport, liveAwayPlayers)
 
         val homeProps = homeSpecs.mapIndexed { idx, spec ->
             evaluateProp(
@@ -214,8 +218,8 @@ object PlayerPropsEngine {
         val consensusImpact = round1((winGap * 0.14).coerceIn(-9.5, 9.5))
         val consensusDetail = when {
             abs(winGap) < 4.0 -> "Win-rate projections keep this matchup close to a coin flip."
-            winGap > 0.0 -> "$homeTeam holds a ${format1(abs(winGap))}% projected win-chance cushion over $awayTeam."
-            else -> "$awayTeam holds a ${format1(abs(winGap))}% projected win-chance cushion over $homeTeam."
+            winGap > 0.0 -> "$homeTeam holds a ${format1(abs(winGap))}% historical win-rate gap over $awayTeam."
+            else -> "$awayTeam holds a ${format1(abs(winGap))}% historical win-rate gap over $homeTeam."
         }
         drivers.add(
             FeatureDriver(
@@ -454,7 +458,7 @@ object PlayerPropsEngine {
         return when {
             spec.marketLabel.contains("Goalscorer", ignoreCase = true) -> "Yes (1+ Goal)"
             spec.marketLabel.contains("Touchdown", ignoreCase = true) -> "Yes (1+ TD)"
-            spec.marketLabel.contains("Booked", ignoreCase = true) -> "Yes (Yellow Card)"
+            spec.marketLabel.contains("Booked", ignoreCase = true) -> "To Be Booked"
             spec.marketLabel.contains("Assist", ignoreCase = true) -> "Yes (1+ Assist)"
             spec.marketLabel.contains("Anytime Goal", ignoreCase = true) -> "Yes (1+ Goal)"
             spec.marketLabel.contains("Total Bases", ignoreCase = true) -> "Over 1.5 Bases"
@@ -562,6 +566,89 @@ object PlayerPropsEngine {
     // Embedded Real Player Profiles Across Major Teams & Sports
     // -------------------------------------------------------------------------
 
+    /**
+     * Builds player prop projections directly from LIVE synced 2026-27 ESPN/NHL rosters & season leaders.
+     * Guarantees zero stale transferred players whenever synced on-device.
+     */
+    private fun buildLivePropSpecs(sport: Sport, players: List<LivePlayerEntry>): List<PropSpec> {
+        val clean = players.filter { it.name.isNotBlank() }.distinctBy { it.name.lowercase() }
+        if (clean.isEmpty()) return emptyList()
+
+        return when (sport) {
+            Sport.FOOTBALL -> {
+                val forwards = clean.filter { it.position in setOf("F", "FW", "ST", "CF", "LW", "RW", "FORWARD", "ATTACKER") }
+                val mids = clean.filter { it.position in setOf("M", "MF", "AM", "CM", "DM", "MIDFIELDER") }
+                val defs = clean.filter { it.position in setOf("D", "DF", "CB", "LB", "RB", "DEFENDER") }
+                val p1 = forwards.getOrNull(0) ?: clean.getOrNull(0)
+                val p2 = forwards.getOrNull(1) ?: mids.getOrNull(0) ?: clean.getOrNull(1)
+                val p3 = mids.getOrNull(0)?.takeIf { it != p2 } ?: mids.getOrNull(1) ?: clean.getOrNull(2)
+                val p4 = defs.getOrNull(0) ?: mids.lastOrNull() ?: clean.getOrNull(3)
+                buildList {
+                    p1?.let { add(fbGoal(it.name, it.position.ifBlank { "FW" }, 0.44)) }
+                    p2?.let { add(fbSot(it.name, it.position.ifBlank { "FW" }, 1.20)) }
+                    p3?.let { add(fbAssist(it.name, it.position.ifBlank { "MF" }, 0.28)) }
+                    p4?.let { add(fbCard(it.name, it.position.ifBlank { "DF" }, 0.28)) }
+                }
+            }
+            Sport.NBA -> {
+                val ptsLead = clean.firstOrNull { "point" in it.statCategory } ?: clean.getOrNull(0)
+                val rebLead = clean.firstOrNull { "rebound" in it.statCategory } ?: clean.firstOrNull { it.position == "C" || it.position == "PF" } ?: clean.getOrNull(1)
+                val astLead = clean.firstOrNull { "assist" in it.statCategory } ?: clean.firstOrNull { it.position == "PG" } ?: clean.getOrNull(2)
+                val p4 = clean.firstOrNull { it != ptsLead && it != rebLead } ?: clean.getOrNull(3) ?: ptsLead
+                buildList {
+                    ptsLead?.let {
+                        val avg = (it.statValue ?: 22.5).coerceIn(12.0, 36.0)
+                        val line = avg.toInt() - 0.5
+                        add(nbaPts(it.name, it.position.ifBlank { "F" }, avg, 5.6, line))
+                    }
+                    rebLead?.let {
+                        val avg = (it.statValue ?: 8.6).coerceIn(4.5, 15.0)
+                        val line = avg.toInt() - 0.5
+                        add(nbaReb(it.name, it.position.ifBlank { "C" }, avg, 2.5, line))
+                    }
+                    astLead?.let {
+                        val avg = (it.statValue ?: 6.2).coerceIn(3.5, 12.0)
+                        val line = avg.toInt() - 0.5
+                        add(nbaAst(it.name, it.position.ifBlank { "PG" }, avg, 2.1, line))
+                    }
+                    p4?.let { add(nbaThrees(it.name, it.position.ifBlank { "SG" }, 2.6, 2.5)) }
+                }
+            }
+            Sport.NFL -> {
+                val qb = clean.firstOrNull { "pass" in it.statCategory || it.position == "QB" } ?: clean.getOrNull(0)
+                val rb = clean.firstOrNull { "rush" in it.statCategory || it.position == "RB" } ?: clean.getOrNull(1)
+                val wr = clean.firstOrNull { "receiv" in it.statCategory || it.position == "WR" || it.position == "TE" } ?: clean.getOrNull(2)
+                buildList {
+                    qb?.let {
+                        val avg = (it.statValue?.takeIf { v -> v in 150.0..340.0 } ?: 245.0)
+                        add(nflPassYds(it.name, "QB", avg, 52.0, (avg - 10.0).toInt() + 0.5))
+                    }
+                    rb?.let {
+                        val avg = (it.statValue?.takeIf { v -> v in 35.0..135.0 } ?: 72.0)
+                        add(nflRushYds(it.name, "RB", avg, 26.0, (avg - 6.0).toInt() + 0.5))
+                        add(nflTd(it.name, "RB", 0.62))
+                    }
+                    wr?.let {
+                        val avg = (it.statValue?.takeIf { v -> v in 35.0..135.0 } ?: 76.0)
+                        add(nflRecYds(it.name, it.position.ifBlank { "WR" }, avg, 27.0, (avg - 6.0).toInt() + 0.5))
+                    }
+                }
+            }
+            Sport.NHL -> {
+                val fwds = clean.filter { it.position in setOf("C", "L", "R", "LW", "RW", "F") }
+                val p1 = fwds.getOrNull(0) ?: clean.getOrNull(0)
+                val p2 = fwds.getOrNull(1) ?: clean.getOrNull(1)
+                val p3 = fwds.getOrNull(2) ?: clean.getOrNull(2)
+                buildList {
+                    p1?.let { add(nhlGoal(it.name, it.position.ifBlank { "F" }, 0.44)) }
+                    p2?.let { add(nhlSog(it.name, it.position.ifBlank { "F" }, 3.15)) }
+                    p3?.let { add(nhlPoint(it.name, it.position.ifBlank { "F" }, 0.86)) }
+                }
+            }
+            else -> emptyList()
+        }.ifEmpty { emptyList() }
+    }
+
     private fun resolveTeamProps(sport: Sport, teamName: String, isHome: Boolean): List<PropSpec> {
         val key = teamName.trim().lowercase()
         return when (sport) {
@@ -579,46 +666,34 @@ object PlayerPropsEngine {
 
     private fun footballPropsFor(key: String, team: String): List<PropSpec> = when {
         key.contains("arsenal") -> listOf(
-            fbGoal("Bukayo Saka", "RW", 0.44),
-            fbSot("Kai Havertz", "CF", 1.25),
+            fbGoal("Viktor Gyokeres", "ST", 0.54),
+            fbSot("Bukayo Saka", "RW", 1.32),
             fbAssist("Martin Odegaard", "AM", 0.34),
-            fbCard("Declan Rice", "DM", 0.24),
+            fbCard("Bruno Guimaraes", "CM", 0.28),
         )
         key.contains("liverpool") -> listOf(
-            fbGoal("Mohamed Salah", "RW", 0.56),
-            fbShots("Luis Diaz", "LW", 2.55),
-            fbAssist("Trent Alexander-Arnold", "RB", 0.32),
-            fbCard("Alexis Mac Allister", "CM", 0.27),
+            fbGoal("Alexander Isak", "ST", 0.62),
+            fbAssist("Florian Wirtz", "AM", 0.38),
+            fbSot("Mohamed Salah", "RW", 1.35),
+            fbCard("Alexis Mac Allister", "CM", 0.26),
         )
         key.contains("man city") || key.contains("manchester city") -> listOf(
             fbGoal("Erling Haaland", "ST", 0.78),
-            fbSot("Phil Foden", "AM", 1.30),
-            fbAssist("Kevin De Bruyne", "CM", 0.44),
-            fbCard("Rodri", "DM", 0.26),
+            fbSot("Phil Foden", "AM", 1.28),
+            fbAssist("Rayan Cherki", "AM", 0.35),
+            fbShots("Jeremy Doku", "LW", 2.35),
         )
         key.contains("chelsea") -> listOf(
-            fbGoal("Cole Palmer", "AM", 0.52),
-            fbSot("Nicolas Jackson", "ST", 1.28),
-            fbShots("Noni Madueke", "RW", 2.40),
+            fbGoal("Joao Pedro", "ST", 0.48),
+            fbSot("Cole Palmer", "AM", 1.34),
+            fbShots("Morgan Rogers", "AM", 2.30),
             fbCard("Moises Caicedo", "DM", 0.32),
         )
-        key.contains("tottenham") || key.contains("spurs") -> listOf(
-            fbGoal("Son Heung-min", "LW", 0.48),
-            fbSot("Dominic Solanke", "ST", 1.22),
-            fbAssist("James Maddison", "AM", 0.33),
-            fbCard("Cristian Romero", "CB", 0.34),
-        )
-        key.contains("aston villa") || key.contains("villa") -> listOf(
-            fbGoal("Ollie Watkins", "ST", 0.49),
-            fbShots("Morgan Rogers", "AM", 2.35),
-            fbAssist("Youri Tielemans", "CM", 0.26),
-            fbCard("John McGinn", "CM", 0.29),
-        )
         key.contains("newcastle") -> listOf(
-            fbGoal("Alexander Isak", "ST", 0.55),
-            fbSot("Anthony Gordon", "LW", 1.18),
-            fbAssist("Bruno Guimaraes", "CM", 0.27),
-            fbCard("Joelinton", "CM", 0.35),
+            fbGoal("Will Osula", "ST", 0.40),
+            fbSot("Anthony Elanga", "RW", 1.12),
+            fbShots("Bazoumana Toure", "LW", 2.10),
+            fbCard("Tino Livramento", "RB", 0.24),
         )
         key.contains("man utd") || key.contains("manchester united") || key.contains("man united") -> listOf(
             fbSot("Bruno Fernandes", "AM", 1.20),
@@ -671,7 +746,7 @@ object PlayerPropsEngine {
         PropSpec(name, pos, "Anytime Goalscorer", mean, 0.0, 1.0, DistKind.POISSON_AT_LEAST, "Goals")
 
     private fun fbSot(name: String, pos: String, mean: Double) =
-        PropSpec(name, pos, "1+ Shots on Target", mean, 0.0, 1.0, DistKind.POISSON_AT_LEAST, "Shots on Target")
+        PropSpec(name, pos, "1+ SOT", mean, 0.0, 1.0, DistKind.POISSON_AT_LEAST, "Shots on Target")
 
     private fun fbShots(name: String, pos: String, mean: Double) =
         PropSpec(name, pos, "2+ Total Shots", mean, 0.0, 2.0, DistKind.POISSON_AT_LEAST, "Total Shots")

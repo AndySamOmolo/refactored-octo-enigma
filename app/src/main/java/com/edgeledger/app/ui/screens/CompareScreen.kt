@@ -132,7 +132,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            TeamAvatar(home?.team ?: "Home", size = 44.dp)
+                            TeamAvatar(home?.team ?: "Home", size = 44.dp, logoUrl = home?.logoUrl)
                             Text("HOME · TAP", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
                             Text(home?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                             StatusBadge("Power ${home?.powerScore ?: 50}/99", c.accent, c.accentDim)
@@ -150,7 +150,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            TeamAvatar(away?.team ?: "Away", size = 44.dp)
+                            TeamAvatar(away?.team ?: "Away", size = 44.dp, logoUrl = away?.logoUrl)
                             Text("AWAY · TAP", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
                             Text(away?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                             StatusBadge("Power ${away?.powerScore ?: 50}/99", c.accent, c.accentDim)
@@ -209,7 +209,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
                     Text("Side-by-Side Stats", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                     StatCompareBar("Win Rate", home.winPct, away.winPct, "%", 0)
                     StatCompareBar("Scored / Game", home.avgScored, away.avgScored)
-                    StatCompareBar("Allowed / Game", home.avgConceded, away.avgConceded, higherIsBetter = false)
+                    StatCompareBar("Allowed / Gm (Lower = Better)", home.avgConceded, away.avgConceded, higherIsBetter = false)
                     if (sport == Sport.FOOTBALL) {
                         StatCompareBar("Shots / Game", home.shotsPerGame, away.shotsPerGame)
                         StatCompareBar("Corners / Game", home.cornersPerGame, away.cornersPerGame)
@@ -298,6 +298,6 @@ fun CompareScreen(app: EdgeLedgerApp) {
             }
         }
 
-        item { Spacer(Modifier.height(20.dp)) }
+        item { Spacer(Modifier.height(88.dp)) }
     }
 }

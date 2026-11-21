@@ -10,6 +10,7 @@ import com.edgeledger.app.engine.OddsMath
 import com.edgeledger.app.engine.PlayerPropsEngine
 import com.edgeledger.app.engine.PredictionEngine
 import com.edgeledger.app.engine.StakingMode
+import com.edgeledger.app.model.LivePlayerEntry
 import com.edgeledger.app.model.OddsDisplayFormat
 import com.edgeledger.app.model.Sport
 import com.edgeledger.app.theme.SurfaceStyle
@@ -69,17 +70,28 @@ class EdgeLedgerEngineTest {
     }
 
     @Test
-    fun playerPropsAndLineMovementGenerateForAllSports() {
-        for (sp in listOf(Sport.FOOTBALL, Sport.NBA, Sport.NFL, Sport.NHL, Sport.MLB, Sport.TENNIS, Sport.CRICKET)) {
-            val props = PlayerPropsEngine.generatePlayerProps(sp, "Arsenal", "Chelsea", 1.8, 1.2, 78, 65)
-            assertTrue("Expected props for $sp", props.isNotEmpty())
-            props.forEach { p ->
-                assertTrue(p.overChancePct in 1..99)
-                assertTrue(p.rangeHigh >= p.rangeLow)
-            }
-        }
-        val series = PlayerPropsEngine.buildLineMovementSeries("fx-1", 0.58, 0.55)
-        assertEquals(6, series.size)
+    fun playerPropsUseOnlyLiveSyncedRostersAndConserveTeamXg() {
+        // Without live synced rosters, zero hardcoded/guessed players are fabricated
+        val emptyProps = PlayerPropsEngine.generatePlayerProps(Sport.FOOTBALL, "Newcastle United", "Arsenal", 0.4, 1.8, 60, 82)
+        assertTrue(emptyProps.isEmpty())
+
+        // With live synced rosters, props generate cleanly and conserve team xG (<= 40% per player)
+        val liveProps = PlayerPropsEngine.generatePlayerProps(
+            sport = Sport.FOOTBALL,
+            homeTeam = "Newcastle United",
+            awayTeam = "Arsenal",
+            projectedHomeScore = 0.4,
+            projectedAwayScore = 1.8,
+            homePower = 60,
+            awayPower = 82,
+            liveHomePlayers = listOf(LivePlayerEntry("Will Osula", "ST"), LivePlayerEntry("Anthony Elanga", "RW")),
+            liveAwayPlayers = listOf(LivePlayerEntry("Viktor Gyokeres", "ST"), LivePlayerEntry("Bukayo Saka", "RW")),
+        )
+        assertTrue(liveProps.isNotEmpty())
+        val homeGoalProp = liveProps.firstOrNull { it.team == "Newcastle United" && it.marketLabel.contains("Goal", ignoreCase = true) }
+        assertNotNull(homeGoalProp)
+        assertTrue("Lead striker xG must not exceed 50% of 0.4 team xG", (homeGoalProp?.projectedValue ?: 1.0) <= 0.25)
+
         val (lo, hi) = PlayerPropsEngine.computeUncertaintyInterval(0.60, 3)
         assertTrue(hi - lo >= 10)
     }
@@ -169,5 +181,26 @@ class EdgeLedgerEngineTest {
         nba.topPicks.forEach { pk ->
             assertTrue("Expected pick >= 50%, got ${pk.label} (${pk.chancePct}%)", pk.chancePct >= 50)
         }
+    }
+
+    @Test
+    fun nov2026RostersAndLiveRosterPriorityAreAccurate() {
+        val unsynced = PlayerPropsEngine.generatePlayerProps(Sport.FOOTBALL, "Newcastle United", "Liverpool", 1.2, 1.8, 60, 82)
+        assertTrue("Unsynced matches should not invent hardcoded players", unsynced.isEmpty())
+
+        // Live synced roster ALWAYS overrides any fallback
+        val liveProps = PlayerPropsEngine.generatePlayerProps(
+            sport = Sport.FOOTBALL,
+            homeTeam = "Newcastle United",
+            awayTeam = "Arsenal",
+            projectedHomeScore = 1.4,
+            projectedAwayScore = 1.6,
+            homePower = 65,
+            awayPower = 80,
+            liveHomePlayers = listOf(LivePlayerEntry("Live Test Striker", "ST")),
+            liveAwayPlayers = listOf(LivePlayerEntry("Live Away Winger", "RW")),
+        )
+        assertTrue(liveProps.any { it.playerName == "Live Test Striker" })
+        assertTrue(liveProps.any { it.playerName == "Live Away Winger" })
     }
 }

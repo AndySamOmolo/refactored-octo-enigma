@@ -46,6 +46,7 @@ import com.edgeledger.app.model.Sport
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.ui.components.FeatureDriverRow
 import com.edgeledger.app.ui.components.FormDots
+import com.edgeledger.app.ui.components.formatLocalKickoff
 import com.edgeledger.app.ui.components.LineMovementChart
 import com.edgeledger.app.ui.components.PlayerPropCard
 import com.edgeledger.app.ui.components.StatusBadge
@@ -84,7 +85,7 @@ fun MatchDetailScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
-            title = { Text("Match Breakdown", fontWeight = FontWeight.ExtraBold, fontSize = 18.sp) },
+            title = { Text(if (fixture != null) "${shortTeamName(fixture.homeTeam)} vs ${shortTeamName(fixture.awayTeam)}" else "Match Breakdown", fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(16.5f), maxLines = 1) },
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -164,12 +165,12 @@ fun MatchDetailScreen(
             item {
                 SectionCard(useHeroGradient = true) {
                     Text(
-                        "${fixture.leagueName}${if (fixture.surface != null) " · ${fixture.surface} Court" else ""} · ${fixture.kickoffIso.take(16).replace("T", " ")}",
+                        "${fixture.leagueName}${if (fixture.surface != null) " · ${fixture.surface} Court" else ""} · ${formatLocalKickoff(fixture.kickoffIso)}",
                         color = c.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
                     )
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            TeamAvatar(fixture.homeTeam, size = 48.dp)
+                            TeamAvatar(fixture.homeTeam, size = 48.dp, logoUrl = fixture.homeLogoUrl)
                             Text(fixture.homeTeam, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp, textAlign = TextAlign.Center)
                             Text("Power ${pH?.powerScore ?: 50}/99", color = c.textSecondary, fontSize = 11.sp)
                             FormDots(pH?.recentForm.orEmpty())
@@ -190,7 +191,7 @@ fun MatchDetailScreen(
                             )
                         }
                         Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            TeamAvatar(fixture.awayTeam, size = 48.dp)
+                            TeamAvatar(fixture.awayTeam, size = 48.dp, logoUrl = fixture.awayLogoUrl)
                             Text(fixture.awayTeam, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp, textAlign = TextAlign.Center)
                             Text("Power ${pA?.powerScore ?: 50}/99", color = c.textSecondary, fontSize = 11.sp)
                             FormDots(pA?.recentForm.orEmpty())
@@ -248,7 +249,7 @@ fun MatchDetailScreen(
                 item {
                     SectionCard {
                         Text("What's Driving This Prediction", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
-                        Text("Signed impact of ratings, form, home edge, and conditions.", color = c.textMuted, fontSize = scaledSp(12f))
+                        Text("Signed impact from ${shortTeamName(fixture.homeTeam)}'s perspective.", color = c.textMuted, fontSize = scaledSp(12f))
                         fixture.featureDrivers.forEach { drv ->
                             FeatureDriverRow(drv)
                         }
@@ -330,8 +331,8 @@ fun MatchDetailScreen(
                                 MetricTile("Both Teams Score", "${m.bttsYesPct}%", "1st Half Goal: ${m.firstHalfOver05Pct}%", Modifier.weight(1f))
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                MetricTile("Home Clean Sheet", "${m.homeCleanSheetPct}%", "Win to Nil: ${m.homeWinToNilPct}%", Modifier.weight(1f))
-                                MetricTile("Home Win & O1.5", "${m.homeWinAndOver15Pct}%", "Win & BTTS: ${m.homeWinAndBttsPct}%", Modifier.weight(1f))
+                                MetricTile("Home Clean Sheet", "${m.homeCleanSheetPct}%", "${shortTeamName(fixture.homeTeam)} Win to Nil: ${m.homeWinToNilPct}%", Modifier.weight(1f))
+                                MetricTile("Home Win & O1.5", "${m.homeWinAndOver15Pct}%", "${shortTeamName(fixture.homeTeam)} Win & BTTS: ${m.homeWinAndBttsPct}%", Modifier.weight(1f))
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 MetricTile("Projected Corners", String.format("%.1f", m.projectedCorners), "O8.5: ${m.cornersOver85Pct}% · O9.5: ${m.cornersOver95Pct}%", Modifier.weight(1f))
@@ -407,7 +408,7 @@ fun MatchDetailScreen(
                         Text("Team Stats Comparison", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
                         StatCompareBar("Win Rate", pH.winPct, pA.winPct, "%", 0)
                         StatCompareBar("Scored / Game", pH.avgScored, pA.avgScored)
-                        StatCompareBar("Allowed / Game", pH.avgConceded, pA.avgConceded, higherIsBetter = false)
+                        StatCompareBar("Allowed / Gm (Lower = Better)", pH.avgConceded, pA.avgConceded, higherIsBetter = false)
                         if (fixture.sport == Sport.FOOTBALL) {
                             StatCompareBar("Shots on Target", pH.shotsOnTargetPerGame, pA.shotsOnTargetPerGame)
                             StatCompareBar("Corners / Game", pH.cornersPerGame, pA.cornersPerGame)
@@ -466,7 +467,7 @@ fun MatchDetailScreen(
                 }
             }
 
-            item { Spacer(Modifier.height(24.dp)) }
+            item { Spacer(Modifier.height(88.dp)) }
         }
     }
 }

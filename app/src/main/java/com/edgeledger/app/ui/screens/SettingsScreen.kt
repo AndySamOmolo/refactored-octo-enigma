@@ -857,7 +857,18 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             }
                             Switch(checked = prefs.alertsEnabled, onCheckedChange = { v -> app.prefsRepo.updatePrefs { it.copy(alertsEnabled = v) } })
                         }
-                        Text("Quiet Hours: ${prefs.quietHoursStart}:00 – ${prefs.quietHoursEnd}:00 (30 min per-game cooldown)", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.SemiBold)
+                        Text("Quiet Hours: %02d:00 – %02d:00 (30 min cooldown)".format(prefs.quietHoursStart, prefs.quietHoursEnd), color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.SemiBold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursStart = (it.quietHoursStart + 23) % 24) } }, shape = tokens.shapes.button, modifier = Modifier.weight(1f)) {
+                                Text("Start -1h", fontSize = scaledSp(11.5f))
+                            }
+                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursStart = (it.quietHoursStart + 1) % 24) } }, shape = tokens.shapes.button, modifier = Modifier.weight(1f)) {
+                                Text("Start +1h", fontSize = scaledSp(11.5f))
+                            }
+                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursEnd = (it.quietHoursEnd + 1) % 24) } }, shape = tokens.shapes.button, modifier = Modifier.weight(1f)) {
+                                Text("End +1h", fontSize = scaledSp(11.5f))
+                            }
+                        }
                     }
                 }
 
@@ -878,13 +889,13 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         credits.forEach { line ->
                             Text("• $line", color = c.textSecondary, fontSize = scaledSp(12f))
                         }
-                        Text("EdgeLedger v6.2.0 · 100% On-Device & Local-Only Privacy", color = c.textMuted, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold)
+                        Text("EdgeLedger v7.1.0 · 100% On-Device & Local-Only Privacy", color = c.textMuted, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
         }
 
-        item { Spacer(Modifier.height(20.dp)) }
+        item { Spacer(Modifier.height(88.dp)) }
     }
 }
 

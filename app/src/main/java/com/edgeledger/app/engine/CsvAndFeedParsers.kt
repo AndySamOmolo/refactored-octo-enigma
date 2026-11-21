@@ -2,6 +2,7 @@ package com.edgeledger.app.engine
 
 import com.edgeledger.app.model.BookmakerOddsLine
 import com.edgeledger.app.model.HistoricalMatch
+import com.edgeledger.app.model.LivePlayerEntry
 import com.edgeledger.app.model.Sport
 import com.edgeledger.app.model.TeamProfile
 import kotlinx.serialization.json.Json
@@ -25,6 +26,12 @@ data class RawUpcomingEvent(
     val awayTeam: String,
     val surface: String? = null,
     val bookOdds: List<BookmakerOddsLine> = emptyList(),
+    val homeTeamId: String? = null,
+    val awayTeamId: String? = null,
+    val homeLeaders: List<LivePlayerEntry> = emptyList(),
+    val awayLeaders: List<LivePlayerEntry> = emptyList(),
+    val homeLogoUrl: String? = null,
+    val awayLogoUrl: String? = null,
 )
 
 object CsvAndFeedParsers {
@@ -423,6 +430,35 @@ object CsvAndFeedParsers {
                     )
                 )
             } else {
+                fun logoOf(c: JsonObject): String? {
+                    val t = c["team"] as? JsonObject ?: return null
+                    t["logo"]?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }?.let { return it }
+                    val logos = t["logos"] as? JsonArray ?: return null
+                    return (logos.firstOrNull() as? JsonObject)?.get("href")?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }
+                }
+
+                fun teamIdOf(c: JsonObject): String? =
+                    (c["team"] as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
+
+                fun leadersOf(c: JsonObject): List<LivePlayerEntry> {
+                    val out = mutableListOf<LivePlayerEntry>()
+                    val leaders = c["leaders"] as? JsonArray ?: return out
+                    for (catEl in leaders) {
+                        val catObj = catEl as? JsonObject ?: continue
+                        val catName = catObj["name"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
+                        val arr = catObj["leaders"] as? JsonArray ?: continue
+                        val top = arr.firstOrNull() as? JsonObject ?: continue
+                        val athlete = top["athlete"] as? JsonObject ?: continue
+                        val name = athlete["displayName"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                        if (name.isBlank()) continue
+                        val pos = (athlete["position"] as? JsonObject)?.get("abbreviation")?.jsonPrimitive?.contentOrNull?.trim().orEmpty().ifBlank { "STAR" }
+                        val valNum = top["value"]?.jsonPrimitive?.doubleOrNull
+                            ?: top["displayValue"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                        out.add(LivePlayerEntry(name = name, position = pos, statCategory = catName, statValue = valNum))
+                    }
+                    return out
+                }
+
                 up.add(
                     RawUpcomingEvent(
                         id = "espn-$leagueId-$id",
@@ -433,6 +469,12 @@ object CsvAndFeedParsers {
                         homeTeam = hName,
                         awayTeam = aName,
                         surface = if (sport == Sport.TENNIS) "Hard" else null,
+                        homeTeamId = teamIdOf(homeObj),
+                        awayTeamId = teamIdOf(awayObj),
+                        homeLeaders = leadersOf(homeObj),
+                        awayLeaders = leadersOf(awayObj),
+                        homeLogoUrl = logoOf(homeObj),
+                        awayLogoUrl = logoOf(awayObj),
                     )
                 )
             }
@@ -467,9 +509,15 @@ object CsvAndFeedParsers {
                 val obj = g as? JsonObject ?: continue
                 val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
                 val start = obj["startTimeUTC"]?.jsonPrimitive?.contentOrNull ?: ""
-                val h = resolveNhlTeamObject(obj["homeTeam"] as? JsonObject) ?: continue
-                val a = resolveNhlTeamObject(obj["awayTeam"] as? JsonObject) ?: continue
-                out.add(RawUpcomingEvent("nhl-$id", Sport.NHL, "NHL", "NHL", start, h, a))
+                val hObj = obj["homeTeam"] as? JsonObject
+                val aObj = obj["awayTeam"] as? JsonObject
+                val h = resolveNhlTeamObject(hObj) ?: continue
+                val a = resolveNhlTeamObject(aObj) ?: continue
+                val hAbbrev = hObj?.get("abbrev")?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
+                val aAbbrev = aObj?.get("abbrev")?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
+                val hLogo = hObj?.get("logo")?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }
+                val aLogo = aObj?.get("logo")?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }
+                out.add(RawUpcomingEvent("nhl-$id", Sport.NHL, "NHL", "NHL", start, h, a, homeTeamId = hAbbrev, awayTeamId = aAbbrev, homeLogoUrl = hLogo, awayLogoUrl = aLogo))
             }
         }
         return out
@@ -529,7 +577,7 @@ object CsvAndFeedParsers {
                 val dSlots = ((l10Otl.toDouble() / total10) * 5.0).toInt().coerceIn(0, 5 - wSlots)
                 val lSlots = (5 - wSlots - dSlots).coerceAtLeast(0)
                 repeat(lSlots) { add("L") }
-                repeat(dSlots) { add("D") }
+                repeat(dSlots) { add("OTL") }
                 repeat(wSlots) { add("W") }
             }
 
@@ -550,6 +598,7 @@ object CsvAndFeedParsers {
                 avgScored = avgScored,
                 avgConceded = avgConceded,
                 recentForm = recent5,
+                logoUrl = s["teamLogo"]?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") },
             )
         }
         return out
@@ -569,6 +618,125 @@ object CsvAndFeedParsers {
                 val h = ((teams["home"] as? JsonObject)?.get("team") as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull ?: continue
                 val a = ((teams["away"] as? JsonObject)?.get("team") as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull ?: continue
                 out.add(RawUpcomingEvent("mlb-$id", Sport.MLB, "MLB", "MLB", date, canonicalTeam(h, Sport.MLB), canonicalTeam(a, Sport.MLB)))
+            }
+        }
+        return out
+    }
+
+    /**
+     * Parses live ESPN team roster JSON (works for Soccer, NBA, NFL):
+     * https://site.web.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{teamId}/roster
+     */
+    fun parseEspnRoster(rawJson: String): List<LivePlayerEntry> {
+        val out = mutableListOf<LivePlayerEntry>()
+        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
+        val athletes = root["athletes"] as? JsonArray ?: return out
+
+        fun addAthlete(a: JsonObject) {
+            val name = a["displayName"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?: a["fullName"]?.jsonPrimitive?.contentOrNull?.trim()
+                ?: return
+            if (name.isBlank()) return
+            val pos = (a["position"] as? JsonObject)?.get("abbreviation")?.jsonPrimitive?.contentOrNull?.trim()
+                ?: (a["position"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim()
+                ?: ""
+            out.add(LivePlayerEntry(name = name, position = pos.uppercase()))
+        }
+
+        for (el in athletes) {
+            val obj = el as? JsonObject ?: continue
+            val items = obj["items"] as? JsonArray
+            if (items != null) {
+                for (item in items) {
+                    (item as? JsonObject)?.let { addAthlete(it) }
+                }
+            } else {
+                addAthlete(obj)
+            }
+        }
+        return out.distinctBy { it.name.lowercase() }
+    }
+
+    /**
+     * Parses official NHL live team roster JSON:
+     * https://api-web.nhle.com/v1/roster/{abbrev}/current
+     */
+    fun parseNhlRoster(rawJson: String): List<LivePlayerEntry> {
+        val out = mutableListOf<LivePlayerEntry>()
+        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
+        for (groupKey in listOf("forwards", "defensemen")) {
+            val arr = root[groupKey] as? JsonArray ?: continue
+            for (el in arr) {
+                val obj = el as? JsonObject ?: continue
+                val first = (obj["firstName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val last = (obj["lastName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val full = "$first $last".trim()
+                if (full.isBlank()) continue
+                val pos = obj["positionCode"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase().orEmpty().ifBlank { if (groupKey == "forwards") "F" else "D" }
+                out.add(LivePlayerEntry(name = full, position = pos))
+            }
+        }
+        return out.distinctBy { it.name.lowercase() }
+    }
+
+    /**
+     * Parses live ESPN NBA Standings JSON (keyless):
+     * https://site.web.api.espn.com/apis/v2/sports/basketball/nba/standings
+     * Populates real 2026-27 wins, losses, PPG, OPPG, Elo, Power Score, and Last 5 form for all 30 NBA teams.
+     */
+    fun parseEspnNbaStandings(rawJson: String): Map<String, TeamProfile> {
+        val out = mutableMapOf<String, TeamProfile>()
+        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
+        val children = root["children"] as? JsonArray ?: return out
+
+        for (conf in children) {
+            val standings = (conf as? JsonObject)?.get("standings") as? JsonObject ?: continue
+            val entries = standings["entries"] as? JsonArray ?: continue
+            for (el in entries) {
+                val entry = el as? JsonObject ?: continue
+                val teamObj = entry["team"] as? JsonObject ?: continue
+                val fullName = teamObj["displayName"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val logoHref = (teamObj["logos"] as? JsonArray)?.firstOrNull()?.let { (it as? JsonObject)?.get("href")?.jsonPrimitive?.contentOrNull }?.takeIf { it.startsWith("http") }
+                if (fullName.isBlank()) continue
+                val statsArr = entry["stats"] as? JsonArray ?: continue
+                val statMap = mutableMapOf<String, Double>()
+                for (stEl in statsArr) {
+                    val stObj = stEl as? JsonObject ?: continue
+                    val name = stObj["name"]?.jsonPrimitive?.contentOrNull ?: continue
+                    val v = stObj["value"]?.jsonPrimitive?.doubleOrNull ?: continue
+                    statMap[name] = v
+                }
+                val w = (statMap["wins"] ?: 0.0).toInt()
+                val l = (statMap["losses"] ?: 0.0).toInt()
+                val gp = max(1, w + l)
+                val winPct = statMap["winPercent"] ?: (w.toDouble() / gp)
+                val ppg = statMap["avgPointsFor"] ?: 113.5
+                val oppg = statMap["avgPointsAgainst"] ?: 113.5
+                val diff = ppg - oppg
+                val sampleWeight = gp.toDouble() / (gp + 10.0)
+                val elo = (1500.0 + sampleWeight * ((winPct - 0.50) * 380.0 + diff * 12.0)).coerceIn(1240.0, 1780.0)
+                val wSlots = (winPct * 5.0).toInt().coerceIn(0, 5)
+                val recent5 = buildList {
+                    repeat(5 - wSlots) { add("L") }
+                    repeat(wSlots) { add("W") }
+                }
+                out[PredictionEngine.profileKey(Sport.NBA, fullName)] = TeamProfile(
+                    team = fullName,
+                    sport = Sport.NBA,
+                    leagueId = "NBA",
+                    elo = elo,
+                    powerScore = PredictionEngine.eloToPowerScore(elo, Sport.NBA, isClubEloAnchored = false),
+                    gamesPlayed = gp,
+                    wins = w,
+                    losses = l,
+                    winPct = winPct * 100.0,
+                    homeWinPct = (winPct * 100.0 + 4.0).coerceIn(10.0, 95.0),
+                    awayWinPct = (winPct * 100.0 - 4.0).coerceIn(5.0, 90.0),
+                    avgScored = ppg,
+                    avgConceded = oppg,
+                    recentForm = recent5,
+                    logoUrl = logoHref,
+                )
             }
         }
         return out

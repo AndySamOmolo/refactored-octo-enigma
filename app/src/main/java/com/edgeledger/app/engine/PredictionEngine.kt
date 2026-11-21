@@ -508,7 +508,18 @@ object PredictionEngine {
         }
 
         // US Team Sports + Cricket / F1 / MMA
-        val baseWinH = expectedEloScore(hElo + homeAdvFor(sport), aElo)
+        val tempScale = when (sport) {
+            Sport.NHL, Sport.MLB -> 1.25
+            Sport.NFL, Sport.NBA -> 1.15
+            else -> 1.0
+        }
+        val rawWinH = expectedEloScore((hElo + homeAdvFor(sport) - aElo) / tempScale + 1500.0, 1500.0)
+        val maxCap = when (sport) {
+            Sport.NHL, Sport.MLB -> 0.74
+            Sport.NFL, Sport.NBA -> 0.82
+            else -> 0.88
+        }
+        val baseWinH = rawWinH.coerceIn(1.0 - maxCap, maxCap)
         val winH = if (sharpMarketHomeProb != null && marketBlendWeight > 0.0) {
             val w = marketBlendWeight.coerceIn(0.0, 0.5)
             baseWinH * (1.0 - w) + sharpMarketHomeProb * w
@@ -791,14 +802,18 @@ object PredictionEngine {
             ReliabilityBin(labels[i], ((binHits[i].toDouble() / binCounts[i]) * 100.0).roundToInt(), binCounts[i])
         }
 
+        val hasGraded = staked > 0.0
+        val cleanRoi = (roi * 10.0).roundToInt() / 10.0
+        val isStrong = n >= 40 && mBrier < bBrier && (!hasGraded || cleanRoi >= 2.0)
         return LeagueTrackRecord(
             sport = sport,
             leagueId = leagueId,
             leagueName = leagueName,
             gamesTested = n,
             accuracyScore = accScore,
-            beatsSimpleGuess = mBrier < bBrier,
-            simulatedProfitPct = (roi * 10.0).roundToInt() / 10.0,
+            beatsSimpleGuess = isStrong,
+            simulatedProfitPct = cleanRoi,
+            hasGradedOdds = hasGraded,
             reliabilityBins = bins,
         )
     }

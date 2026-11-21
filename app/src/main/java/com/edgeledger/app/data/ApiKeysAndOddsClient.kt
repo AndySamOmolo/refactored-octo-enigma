@@ -818,6 +818,25 @@ class OptionalOddsAndDataClient(
     private fun normalizeTeamName(name: String): String =
         name.trim().lowercase(Locale.US).replace(WHITESPACE_REGEX, " ")
 
+
+    private fun isSportsMarketQuestion(question: String): Boolean {
+        val q = question.lowercase(Locale.US)
+        val blocked = listOf(
+            "trump", "biden", "xi jinping", "democrat", "republican", "election", "president",
+            "senate", "congress", "governor", "nominee", "primary", "fed ", "interest rate",
+            "tariff", "bitcoin", "btc", "ethereum", "crypto", "inflation", "recession", "ukraine",
+            "china", "israel", "gaza", "nato", "supreme court", "cabinet", "pardon", "oscar", "grammy"
+        )
+        if (blocked.any { it in q }) return false
+        val allowed = listOf(
+            "nba", "nfl", "nhl", "mlb", "premier league", "champions league", "la liga", "bundesliga",
+            "serie a", "ligue 1", "world cup", "super bowl", "stanley cup", "world series",
+            "ufc", "mma", "formula 1", "f1", "grand prix", "atp", "wta", "wimbledon", "us open",
+            "cricket", "ipl", " vs ", " vs. ", "beat ", "playoffs", "mvp", "fc ", "united", "city"
+        )
+        return allowed.any { it in q }
+    }
+
     private fun sanitizeError(e: Throwable): String {
         val raw = e.message?.take(120) ?: e::class.simpleName ?: "Unknown error"
         return raw.replace(SECRET_QUERY_REGEX, "$1=REDACTED")
