@@ -64,7 +64,7 @@ class EdgeLedgerEngineTest {
         assertEquals("2.00", OddsMath.formatOdds(2.0, OddsDisplayFormat.DECIMAL))
         assertEquals("+100", OddsMath.formatOdds(2.0, OddsDisplayFormat.AMERICAN))
         assertEquals("1/1", OddsMath.formatOdds(2.0, OddsDisplayFormat.FRACTIONAL))
-        assertEquals("50%", OddsMath.formatOdds(2.0, OddsDisplayFormat.PERCENT))
+        assertEquals("50.0%", OddsMath.formatOdds(2.0, OddsDisplayFormat.PERCENT))
     }
 
     @Test

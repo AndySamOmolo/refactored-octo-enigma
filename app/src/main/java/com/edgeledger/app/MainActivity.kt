@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BookmarkBorder
-import androidx.compose.material.icons.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.QueryStats
 import androidx.compose.material.icons.outlined.Settings
@@ -84,7 +84,7 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
 
     val tabs = listOf(
         BottomTab("games", "Games", Icons.Outlined.EmojiEvents),
-        BottomTab("compare", "Compare", Icons.Outlined.CompareArrows),
+        BottomTab("compare", "Compare", Icons.AutoMirrored.Outlined.CompareArrows),
         BottomTab("accuracy", "Accuracy", Icons.Outlined.QueryStats),
         BottomTab("picks", "Picks", Icons.Outlined.BookmarkBorder),
         BottomTab("settings", "Settings", Icons.Outlined.Settings),
