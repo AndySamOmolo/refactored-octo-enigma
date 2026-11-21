@@ -1,5 +1,8 @@
 package com.edgeledger.app.model
 
+import com.edgeledger.app.engine.FeatureDriver
+import com.edgeledger.app.engine.LineMovePoint
+import com.edgeledger.app.engine.PlayerPropPrediction
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -164,7 +167,7 @@ data class FullMatchMarkets(
     val probHome: Double,
     val probDraw: Double,
     val probAway: Double,
-    val modelVersion: String = "v4.0.0",
+    val modelVersion: String = "v6.0.0",
     // Football rich markets
     val doubleChanceHomeOrDrawPct: Int = 0,
     val doubleChanceAwayOrDrawPct: Int = 0,
@@ -253,6 +256,12 @@ data class MatchFixture(
     val bestValueLabel: String? = null,
     val bestValueEdgePct: Double? = null,
     val bestSuggestedStakePct: Double? = null,
+    val playerProps: List<PlayerPropPrediction> = emptyList(),
+    val featureDrivers: List<FeatureDriver> = emptyList(),
+    val lineMovement: List<LineMovePoint> = emptyList(),
+    val homeRangeLowPct: Int = 0,
+    val homeRangeHighPct: Int = 0,
+    val marketHoldPct: Double = 0.0,
 )
 
 @Serializable

@@ -469,7 +469,7 @@ object PredictionEngine {
             baseWinH * (1.0 - w) + sharpMarketHomeProb * w
         } else baseWinH
 
-        val (defScoreH, defScoreA, marginSd, totalSd, altSp, closeLabel, closeBand, otBase, unit) = when (sport) {
+        val cfg: Array<Any> = when (sport) {
             Sport.NFL -> arrayOf(23.5, 21.0, 13.5, 13.0, 3.5, "One-Score Game (<=7 pts)", 7.0, 0.08, "Points")
             Sport.NBA -> arrayOf(115.0, 111.5, 12.2, 17.0, 5.5, "Close Finish (<=6 pts)", 6.0, 0.06, "Points")
             Sport.NHL -> arrayOf(3.2, 2.8, 2.15, 2.2, 1.5, "1-Goal Game", 1.5, 0.23, "Goals")
@@ -477,19 +477,27 @@ object PredictionEngine {
             Sport.CRICKET -> arrayOf(172.0, 165.0, 22.0, 28.0, 15.5, "Close Finish (<=15 runs)", 15.0, 0.04, "Runs")
             else -> arrayOf(1.0, 0.0, 1.0, 1.0, 0.5, "Close Matchup", 0.5, 0.05, "Pts")
         }
+        val defScoreH = cfg[0] as Double
+        val defScoreA = cfg[1] as Double
+        val marginSd = cfg[2] as Double
+        val totalSd = cfg[3] as Double
+        val altSpreadVal = cfg[4] as Double
+        val closeLabel = cfg[5] as String
+        val closeBand = cfg[6] as Double
+        val otBase = cfg[7] as Double
+        val unit = cfg[8] as String
 
-        val pH = ((homeProfile?.avgScored ?: (defScoreH as Double)) + (awayProfile?.avgConceded ?: (defScoreA as Double))) / 2.0
-        val pA = ((awayProfile?.avgScored ?: (defScoreA as Double)) + (homeProfile?.avgConceded ?: (defScoreH as Double))) / 2.0
+        val pH = ((homeProfile?.avgScored ?: defScoreH) + (awayProfile?.avgConceded ?: defScoreA)) / 2.0
+        val pA = ((awayProfile?.avgScored ?: defScoreA) + (homeProfile?.avgConceded ?: defScoreH)) / 2.0
         val margin = pH - pA
         val total = pH + pA
         val line = total.toInt() + 0.5
-        val overP = 1.0 - normalCdf(line, total, totalSd as Double)
+        val overP = 1.0 - normalCdf(line, total, totalSd)
         val fav = if (winH >= 0.5) homeTeam else awayTeam
         val favProb = max(winH, 1.0 - winH)
-        val altSpreadVal = altSp as Double
-        val altP = (1.0 - normalCdf(altSpreadVal, abs(margin), marginSd as Double)).coerceIn(0.12, 0.90)
-        val closeP = (normalCdf(closeBand as Double, margin, marginSd) - normalCdf(-closeBand, margin, marginSd)).coerceIn(0.15, 0.85)
-        val otP = ((otBase as Double) * exp(-((margin / marginSd).pow(2)))).coerceIn(0.03, 0.28)
+        val altP = (1.0 - normalCdf(altSpreadVal, abs(margin), marginSd)).coerceIn(0.12, 0.90)
+        val closeP = (normalCdf(closeBand, margin, marginSd) - normalCdf(-closeBand, margin, marginSd)).coerceIn(0.15, 0.85)
+        val otP = (otBase * exp(-((margin / marginSd).pow(2)))).coerceIn(0.03, 0.28)
         val decFmt = if (sport == Sport.NHL || sport == Sport.MLB) "%.1f" else "%.0f"
         val scoreDisp = "${String.format(decFmt, pH)} – ${String.format(decFmt, pA)}"
         val htDisp = "${String.format(decFmt, pH * 0.49)} – ${String.format(decFmt, pA * 0.49)}"

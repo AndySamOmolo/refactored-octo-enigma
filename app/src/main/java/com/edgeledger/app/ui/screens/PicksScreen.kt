@@ -1,7 +1,6 @@
 package com.edgeledger.app.ui.screens
 
 import android.content.Intent
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,18 +9,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,18 +23,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.edgeledger.app.EdgeLedgerApp
 import com.edgeledger.app.engine.OddsMath
-import com.edgeledger.app.model.RiskStyle
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.ui.components.MetricTile
 import com.edgeledger.app.ui.components.SectionCard
+import com.edgeledger.app.ui.components.StatusBadge
+import com.edgeledger.app.ui.components.TokenPill
+import com.edgeledger.app.ui.components.scaledSp
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -53,25 +45,38 @@ fun PicksScreen(app: EdgeLedgerApp) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs by app.prefsRepo.prefs.collectAsStateWithLifecycle()
-    val bets by app.database.dao().observePersonalBets().collectAsStateWithLifecycle(initialValue = emptyList())
+    val allBets by app.database.dao().observePersonalBets().collectAsStateWithLifecycle(initialValue = emptyList())
 
-    var balanceInput by remember(prefs.bankroll) { mutableStateOf(prefs.bankroll.toInt().toString()) }
+    val isPaper = prefs.isPaperTrading
+    val bets = remember(allBets, isPaper) { allBets.filter { it.isPaper == isPaper } }
+    val baseBalance = if (isPaper) prefs.paperBankroll else prefs.bankroll
 
     var won = 0
     var settled = 0
     var netPnl = 0.0
+    var clvSum = 0.0
+    var clvCount = 0
+
     for (b in bets) {
         when (b.status) {
             "WON" -> { settled++; won++; netPnl += b.stakeAmount * (b.decimalOdds - 1.0) }
+            "HALF_WIN" -> { settled++; won++; netPnl += (b.stakeAmount * (b.decimalOdds - 1.0)) * 0.5 }
             "LOST" -> { settled++; netPnl -= b.stakeAmount }
+            "HALF_LOSS" -> { settled++; netPnl -= b.stakeAmount * 0.5 }
+            "CASH_OUT" -> { settled++; netPnl += b.stakeAmount * 0.25 }
+        }
+        b.closingOdds?.takeIf { it > 1.0 }?.let { close ->
+            clvSum += OddsMath.computeClvPct(b.decimalOdds, close)
+            clvCount++
         }
     }
     val winRate = if (settled > 0) ((won.toDouble() / settled) * 100.0).roundToInt() else 0
+    val avgClv = if (clvCount > 0) clvSum / clvCount else null
 
     fun exportCsv() {
-        val header = "Date,Sport,League,Matchup,Pick,Odds,Stake,Status\n"
+        val header = "Date,Mode,Sport,League,Matchup,Pick,Bookmaker,Odds,ClosingOdds,Stake,Status\n"
         val body = bets.joinToString("\n") {
-            "${it.createdAtIso.take(10)},${it.sport},\"${it.leagueName}\",\"${it.matchup}\",\"${it.selection}\",${it.decimalOdds},${it.stakeAmount},${it.status}"
+            "${it.createdAtIso.take(10)},${if (it.isPaper) "PAPER" else "REAL"},${it.sport},\"${it.leagueName}\",\"${it.matchup}\",\"${it.selection}\",\"${it.bookmaker}\",${it.decimalOdds},${it.closingOdds ?: ""},${it.stakeAmount},${it.status}"
         }
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -81,74 +86,69 @@ fun PicksScreen(app: EdgeLedgerApp) {
         context.startActivity(Intent.createChooser(shareIntent, "Export Picks CSV"))
     }
 
+    fun exportJson() {
+        val rows = bets.joinToString(",\n") {
+            """  {"id":"${it.id}","date":"${it.createdAtIso}","mode":"${if (it.isPaper) "paper" else "real"}","matchup":"${it.matchup}","selection":"${it.selection}","odds":${it.decimalOdds},"closingOdds":${it.closingOdds ?: "null"},"stake":${it.stakeAmount},"status":"${it.status}"}"""
+        }
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Picks Backup (JSON)")
+            putExtra(Intent.EXTRA_TEXT, "[\n$rows\n]")
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Export Picks JSON"))
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(tokens.padMd),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(tokens.spacing.screenPadding),
+        verticalArrangement = Arrangement.spacedBy(tokens.spacing.itemGap),
     ) {
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricTile("Balance", "$${(prefs.bankroll + netPnl).roundToInt()}", null, Modifier.weight(1f))
-                MetricTile("Total Profit", "${if (netPnl >= 0) "+" else ""}$${netPnl.roundToInt()}", null, Modifier.weight(1f))
-                MetricTile("Win Rate", "$winRate%", "$won/$settled won", Modifier.weight(1f))
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("My Saved Picks", color = c.text, fontSize = scaledSp(20f), fontWeight = FontWeight.ExtraBold)
+                Text("Switch between Real Balance and Paper-Trading shadow bankroll to test strategies.", color = c.textMuted, fontSize = scaledSp(12.5f))
+            }
+        }
+
+        // Real vs Paper-Trading (Shadow Bankroll) Switcher (TR-05)
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                TokenPill(
+                    label = "Real Balance",
+                    selected = !isPaper,
+                    onClick = { app.prefsRepo.updatePrefs { it.copy(isPaperTrading = false) } },
+                    modifier = Modifier.weight(1f),
+                )
+                TokenPill(
+                    label = "Paper Trading (Virtual)",
+                    selected = isPaper,
+                    onClick = { app.prefsRepo.updatePrefs { it.copy(isPaperTrading = true) } },
+                    activeColor = c.sharpBadge,
+                    activeContainer = c.accentDim,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
 
         item {
-            SectionCard {
-                Text("Budget & Weekly Auto-Update", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = balanceInput,
-                        onValueChange = { balanceInput = it },
-                        label = { Text("Starting Balance ($)") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Button(
-                        onClick = {
-                            balanceInput.toDoubleOrNull()?.takeIf { it >= 50.0 }?.let { v ->
-                                app.prefsRepo.updatePrefs { it.copy(bankroll = v) }
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = c.accent),
-                    ) {
-                        Text("Apply", color = Color.White, fontWeight = FontWeight.Bold)
-                    }
-                }
-
-                Text("Suggested Bet Size Style", color = c.textSecondary, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    RiskStyle.entries.forEach { style ->
-                        FilterChip(
-                            selected = prefs.riskStyle == style,
-                            onClick = { app.prefsRepo.updatePrefs { it.copy(riskStyle = style) } },
-                            label = { Text(style.label, fontWeight = FontWeight.Bold) },
-                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = c.accentDim, selectedLabelColor = c.accent),
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
-
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Auto-Update Once a Week", color = c.text, fontWeight = FontWeight.Bold, fontSize = 13.5.sp)
-                        Text("Refreshes all free feeds in the background every 7 days.", color = c.textMuted, fontSize = 12.sp)
-                    }
-                    Switch(
-                        checked = prefs.autoSyncWeekly,
-                        onCheckedChange = { checked -> app.prefsRepo.updatePrefs { it.copy(autoSyncWeekly = checked) } },
-                    )
-                }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricTile(if (isPaper) "Virtual Bal" else "Balance", "$${(baseBalance + netPnl).roundToInt()}", null, Modifier.weight(1f))
+                MetricTile("Total Profit", "${if (netPnl >= 0) "+" else ""}$${netPnl.roundToInt()}", avgClv?.let { "CLV ${if (it >= 0) "+" else ""}${String.format("%.1f", it)}%" }, Modifier.weight(1f))
+                MetricTile("Win Rate", "$winRate%", "$won/$settled settled", Modifier.weight(1f))
             }
         }
 
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("My Saved Picks (${bets.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                Text("${if (isPaper) "Paper" else "Real"} Ledger (${bets.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15.5f))
                 if (bets.isNotEmpty()) {
-                    OutlinedButton(onClick = { exportCsv() }) {
-                        Text("Export CSV", color = c.accent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = { exportCsv() }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                            Text("CSV", color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(11.5f))
+                        }
+                        OutlinedButton(onClick = { exportJson() }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                            Text("JSON", color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(11.5f))
+                        }
                     }
                 }
             }
@@ -157,47 +157,92 @@ fun PicksScreen(app: EdgeLedgerApp) {
         if (bets.isEmpty()) {
             item {
                 SectionCard {
-                    Text("No picks saved yet. Open any game in the Games tab and tap Save to track it here.", color = c.textMuted, fontSize = 13.sp)
+                    Text(
+                        if (isPaper) "No paper-trading picks yet" else "No picks saved yet",
+                        color = c.text,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = scaledSp(15f),
+                    )
+                    Text(
+                        "Open any game in the Games tab and tap Save on a match pick or player prop to track profit and closing line value here.",
+                        color = c.textMuted,
+                        fontSize = scaledSp(13f),
+                    )
                 }
             }
         } else {
             items(bets, key = { it.id }) { bet ->
-                Surface(
-                    color = c.surface,
-                    border = BorderStroke(1.dp, c.border),
-                    shape = RoundedCornerShape(tokens.cornerLg),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(bet.matchup, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                            val stColor = when (bet.status) {
-                                "WON" -> c.win
-                                "LOST" -> c.loss
-                                else -> c.draw
-                            }
-                            Text(bet.status, color = stColor, fontWeight = FontWeight.ExtraBold, fontSize = 11.5.sp)
+                var closingInput by remember(bet.id, bet.closingOdds) {
+                    mutableStateOf(bet.closingOdds?.let { String.format("%.2f", it) } ?: "")
+                }
+                val clvPct = bet.closingOdds?.takeIf { it > 1.0 }?.let { close ->
+                    OddsMath.computeClvPct(bet.decimalOdds, close)
+                }
+
+                SectionCard {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text(bet.matchup, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14.5f), modifier = Modifier.weight(1f))
+                        val (stColor, stDim) = when (bet.status) {
+                            "WON", "HALF_WIN" -> c.win to c.winDim
+                            "LOST", "HALF_LOSS" -> c.loss to c.lossDim
+                            "PUSH", "VOID" -> c.textSecondary to c.surfaceRaised
+                            else -> c.pending to c.drawDim
                         }
-                        Text(
-                            "${bet.selection} @ ${OddsMath.formatOdds(bet.decimalOdds, prefs.oddsFormat)} · Stake $${bet.stakeAmount.roundToInt()} · Win Chance ${(bet.modelProb * 100).roundToInt()}%",
-                            color = c.textSecondary,
-                            fontSize = 12.sp,
+                        StatusBadge(bet.status.replace("_", " "), stColor, stDim)
+                    }
+                    Text(
+                        "${bet.selection} @ ${OddsMath.formatOdds(bet.decimalOdds, prefs.oddsFormat)} · Stake $${bet.stakeAmount.roundToInt()} · Win Chance ${(bet.modelProb * 100).roundToInt()}%",
+                        color = c.textSecondary,
+                        fontSize = scaledSp(12.5f),
+                    )
+                    if (clvPct != null) {
+                        StatusBadge(
+                            text = "Closing Line Value: ${if (clvPct >= 0) "+" else ""}${String.format("%.1f", clvPct)}%",
+                            color = if (clvPct >= 0) c.win else c.loss,
+                            containerColor = if (clvPct >= 0) c.winDim else c.lossDim,
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf("WON" to "Won", "LOST" to "Lost", "VOID" to "Refund").forEach { (code, lbl) ->
-                                OutlinedButton(
-                                    onClick = { scope.launch { app.database.dao().updateBetStatus(bet.id, code) } },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                ) {
-                                    Text(lbl, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = closingInput,
+                            onValueChange = { closingInput = it },
+                            label = { Text("Closing Odds") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                closingInput.toDoubleOrNull()?.takeIf { it > 1.0 }?.let { v ->
+                                    scope.launch { app.database.dao().updateClosingOdds(bet.id, v) }
                                 }
-                            }
+                            },
+                            shape = tokens.shapes.button,
+                        ) { Text("Save CLV", color = c.accent, fontSize = scaledSp(11.5f), fontWeight = FontWeight.Bold) }
+                    }
+                    // Full TR-03 Settlement States: Won, Lost, Push, Half-Win, Half-Loss, Void, Cash-Out
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val states = listOf(
+                            "WON" to "Won",
+                            "LOST" to "Lost",
+                            "PUSH" to "Push",
+                            "HALF_WIN" to "½ Win",
+                            "HALF_LOSS" to "½ Loss",
+                            "VOID" to "Void",
+                            "CASH_OUT" to "Cash-Out",
+                        )
+                        items(states) { (code, lbl) ->
+                            OutlinedButton(
+                                onClick = { scope.launch { app.database.dao().updateBetStatus(bet.id, code) } },
+                                shape = tokens.shapes.button,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                            ) { Text(lbl, fontSize = scaledSp(11f), fontWeight = FontWeight.Bold) }
+                        }
+                        item {
                             OutlinedButton(
                                 onClick = { scope.launch { app.database.dao().deleteBet(bet.id) } },
+                                shape = tokens.shapes.button,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                            ) {
-                                Text("Remove", fontSize = 11.sp, color = c.textMuted)
-                            }
+                            ) { Text("Remove", fontSize = scaledSp(11f), color = c.textMuted) }
                         }
                     }
                 }

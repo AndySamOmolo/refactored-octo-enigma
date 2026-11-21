@@ -54,6 +54,8 @@ data class PersonalBetEntity(
     val stakeAmount: Double,
     val status: String = "PENDING", // PENDING, WON, LOST, VOID
     val notes: String = "",
+    val isPaper: Boolean = false,
+    val bookmaker: String = "Manual",
 )
 
 @Dao
@@ -88,7 +90,7 @@ interface EdgeLedgerDao {
 
 @Database(
     entities = [SnapshotEntity::class, LockedPickEntity::class, PersonalBetEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

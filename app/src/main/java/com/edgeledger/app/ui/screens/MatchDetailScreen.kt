@@ -44,12 +44,18 @@ import com.edgeledger.app.engine.OddsMath
 import com.edgeledger.app.engine.PredictionEngine
 import com.edgeledger.app.model.Sport
 import com.edgeledger.app.theme.AppTheme
+import com.edgeledger.app.ui.components.FeatureDriverRow
 import com.edgeledger.app.ui.components.FormDots
+import com.edgeledger.app.ui.components.LineMovementChart
+import com.edgeledger.app.ui.components.PlayerPropCard
+import com.edgeledger.app.ui.components.StatusBadge
+import com.edgeledger.app.ui.components.scaledSp
 import com.edgeledger.app.ui.components.MetricTile
 import com.edgeledger.app.ui.components.ProbBar
 import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatCompareBar
 import com.edgeledger.app.ui.components.TeamAvatar
+import com.edgeledger.app.ui.components.shortTeamName
 import com.edgeledger.app.ui.components.tabularStyle
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -107,7 +113,15 @@ fun MatchDetailScreen(
         var awayOddsStr by remember(fixture.id) { mutableStateOf(String.format("%.2f", firstLine?.awayOdds ?: 3.50)) }
 
         fun savePick(label: String, odds: Double, chance: Double, stakeFrac: Double) {
-            val stake = max(10.0, (prefs.bankroll * max(stakeFrac, 0.015)).roundToInt().toDouble())
+            val activeBankroll = if (prefs.isPaperTrading) prefs.paperBankroll else prefs.bankroll
+            val stake = max(10.0, OddsMath.recommendedStake(
+                bankroll = activeBankroll,
+                modelProb = chance,
+                decimalOdds = odds,
+                mode = prefs.stakingMode,
+                kellyFraction = prefs.riskStyle.kellyFraction,
+                maxCap = prefs.riskStyle.maxStakePct,
+            ).roundToInt().toDouble())
             scope.launch {
                 app.database.dao().upsertBet(
                     PersonalBetEntity(
@@ -121,9 +135,11 @@ fun MatchDetailScreen(
                         decimalOdds = odds,
                         modelProb = chance,
                         stakeAmount = stake,
+                        isPaper = prefs.isPaperTrading,
                     )
                 )
-                savedBanner = "Saved \"$label\" ($${stake.toInt()}) to My Picks"
+                val ledgerName = if (prefs.isPaperTrading) "Paper Picks" else "My Picks"
+                savedBanner = "Saved \"$label\" ($${stake.toInt()}) to $ledgerName"
             }
         }
 
@@ -142,7 +158,7 @@ fun MatchDetailScreen(
 
             // Hero Matchup Card
             item {
-                SectionCard {
+                SectionCard(useHeroGradient = true) {
                     Text(
                         "${fixture.leagueName}${if (fixture.surface != null) " · ${fixture.surface} Court" else ""} · ${fixture.kickoffIso.take(16).replace("T", " ")}",
                         color = c.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
@@ -177,13 +193,26 @@ fun MatchDetailScreen(
                         }
                     }
                     ProbBar(
-                        homeLabel = fixture.homeTeam,
-                        awayLabel = fixture.awayTeam,
+                        homeLabel = shortTeamName(fixture.homeTeam),
+                        awayLabel = shortTeamName(fixture.awayTeam),
                         homeProb = m.probHome,
                         drawProb = if (fixture.sport.hasDraw) m.probDraw else null,
                         awayProb = m.probAway,
                         barHeight = 12.dp,
                     )
+                    if (fixture.homeRangeLowPct > 0 && fixture.homeRangeHighPct > 0) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "80% confidence range (${shortTeamName(fixture.homeTeam)}): ${fixture.homeRangeLowPct}% – ${fixture.homeRangeHighPct}%",
+                                color = c.textMuted,
+                                fontSize = scaledSp(11.5f),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            if (fixture.marketHoldPct > 0.0) {
+                                StatusBadge("Vig ${String.format("%.1f", fixture.marketHoldPct)}%", c.sharpBadge, c.accentDim)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -204,6 +233,52 @@ fun MatchDetailScreen(
                         Text("Why We Lean This Way", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
                         fixture.plainInsights.forEach { bullet ->
                             Text("• $bullet", color = c.textSecondary, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+
+            // Quantitative Feature Drivers (PR-04)
+            if (fixture.featureDrivers.isNotEmpty()) {
+                item {
+                    SectionCard {
+                        Text("What's Driving This Prediction", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
+                        Text("Signed impact of ratings, form, home edge, and conditions.", color = c.textMuted, fontSize = scaledSp(12f))
+                        fixture.featureDrivers.forEach { drv ->
+                            FeatureDriverRow(drv)
+                        }
+                    }
+                }
+            }
+
+            // Interactive Line Movement & Steam Move Chart (OD-02)
+            if (fixture.lineMovement.size >= 2) {
+                item {
+                    SectionCard {
+                        Text("Line Movement & Steam Moves", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
+                        Text("Opening-to-kickoff implied win probability for ${shortTeamName(fixture.homeTeam)}.", color = c.textMuted, fontSize = scaledSp(12f))
+                        LineMovementChart(fixture.lineMovement)
+                    }
+                }
+            }
+
+            // Player Props Section (PR-03)
+            if (fixture.playerProps.isNotEmpty()) {
+                item {
+                    SectionCard {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Player Props (${fixture.playerProps.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
+                            StatusBadge("80% Range", c.accent, c.accentDim)
+                        }
+                        Text("Projected player stat lines adjusted for match pace and opponent defense.", color = c.textMuted, fontSize = scaledSp(12f))
+                        fixture.playerProps.forEach { prop ->
+                            PlayerPropCard(
+                                prop = prop,
+                                onSave = {
+                                    val fairOdds = 100.0 / max(15, prop.overChancePct)
+                                    savePick("${prop.playerName} — ${prop.lineLabel}", fairOdds, prop.overChancePct / 100.0, 0.02)
+                                },
+                            )
                         }
                     }
                 }
