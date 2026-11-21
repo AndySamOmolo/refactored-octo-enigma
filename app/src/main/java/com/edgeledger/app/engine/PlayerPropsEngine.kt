@@ -621,16 +621,16 @@ object PlayerPropsEngine {
                 buildList {
                     qb?.let {
                         val avg = (it.statValue?.takeIf { v -> v in 150.0..340.0 } ?: 245.0)
-                        add(nflPassYds(it.name, "QB", avg, 52.0, (avg - 10.0).toInt() + 0.5))
+                        add(nflPass(it.name, avg, 52.0, (avg - 10.0).toInt() + 0.5))
                     }
                     rb?.let {
                         val avg = (it.statValue?.takeIf { v -> v in 35.0..135.0 } ?: 72.0)
-                        add(nflRushYds(it.name, "RB", avg, 26.0, (avg - 6.0).toInt() + 0.5))
+                        add(nflRush(it.name, avg, 26.0, (avg - 6.0).toInt() + 0.5))
                         add(nflTd(it.name, "RB", 0.62))
                     }
                     wr?.let {
                         val avg = (it.statValue?.takeIf { v -> v in 35.0..135.0 } ?: 76.0)
-                        add(nflRecYds(it.name, it.position.ifBlank { "WR" }, avg, 27.0, (avg - 6.0).toInt() + 0.5))
+                        add(nflRec(it.name, it.position.ifBlank { "WR" }, avg, 27.0, (avg - 6.0).toInt() + 0.5))
                     }
                 }
             }
@@ -641,7 +641,7 @@ object PlayerPropsEngine {
                 val p3 = fwds.getOrNull(2) ?: clean.getOrNull(2)
                 buildList {
                     p1?.let { add(nhlGoal(it.name, it.position.ifBlank { "F" }, 0.44)) }
-                    p2?.let { add(nhlSog(it.name, it.position.ifBlank { "F" }, 3.15)) }
+                    p2?.let { add(nhlShots(it.name, it.position.ifBlank { "F" }, 3.15)) }
                     p3?.let { add(nhlPoint(it.name, it.position.ifBlank { "F" }, 0.86)) }
                 }
             }
