@@ -171,7 +171,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text("Settings", color = c.text, fontSize = scaledSp(21f), fontWeight = FontWeight.ExtraBold)
                     StatusBadge(
-                        text = "WCAG ${String.format("%.1f", textContrast)}:1 ${if (textContrast >= 7.0f) "AAA" else "AA"}",
+                        text = "WCAG ${String.format("%.1f", textContrast)}:1 ${when { textContrast >= 7.0f -> "AAA"; textContrast >= 4.5f -> "AA"; else -> "FAIL" }}",
                         color = if (textContrast >= 4.5f) c.win else c.loss,
                         containerColor = if (textContrast >= 4.5f) c.winDim else c.lossDim,
                     )
@@ -216,7 +216,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                 // Simple vs Advanced Editor Toggle (ED-02)
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        TokenPill("Simple Editor", !advancedMode, { advancedMode = false }, Modifier.weight(1f))
+                        TokenPill("Simple Editor", !advancedMode, { advancedMode = false; activeColorRole = activeColorRole.coerceIn(0, 3) }, Modifier.weight(1f))
                         TokenPill("Advanced Tokens", advancedMode, { advancedMode = true }, Modifier.weight(1f))
                     }
                 }
@@ -225,7 +225,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                 item {
                     SectionCard(useHeroGradient = true) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("LIVE PREVIEW", color = c.accent, fontSize = scaledSp(11f), fontWeight = FontWeight.ExtraBold)
+                            Text("PREVIEW", color = c.accent, fontSize = scaledSp(11f), fontWeight = FontWeight.ExtraBold)
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 listOf("Match", "Prop", "Chart").forEachIndexed { idx, lbl ->
                                     TokenPill(lbl, previewTab == idx, { previewTab = idx })
@@ -375,7 +375,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         Text("Appearance & Color-Blind Modes", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(ThemeMode.entries) { m ->
-                                TokenPill(m.label, config.mode == m, { app.prefsRepo.updateTheme { it.copy(mode = m) } })
+                                TokenPill(m.label, config.mode == m, { app.prefsRepo.updateTheme { it.copy(mode = m, batterySaverAutoAmoled = if (m == ThemeMode.LIGHT) false else it.batterySaverAutoAmoled) } })
                             }
                         }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -505,16 +505,16 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         }
 
                         Text("Card Style", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            SurfaceStyle.entries.forEach { st ->
-                                TokenPill(st.label, config.surfaceStyle == st, { app.prefsRepo.updateTheme { it.copy(surfaceStyle = st) } }, Modifier.weight(1f))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(SurfaceStyle.entries) { st ->
+                                TokenPill(st.label, config.surfaceStyle == st, { app.prefsRepo.updateTheme { it.copy(surfaceStyle = st) } })
                             }
                         }
 
                         Text("Corner Shape", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            ShapeFamily.entries.forEach { sf ->
-                                TokenPill(sf.label, config.shapeFamily == sf, { app.prefsRepo.updateTheme { it.copy(shapeFamily = sf, cardCornerOverrideDp = null) } }, Modifier.weight(1f))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(ShapeFamily.entries) { sf ->
+                                TokenPill(sf.label, config.shapeFamily == sf, { app.prefsRepo.updateTheme { it.copy(shapeFamily = sf, cardCornerOverrideDp = null) } })
                             }
                         }
 
@@ -537,9 +537,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         }
 
                         Text("Density", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            DensityPreset.entries.forEach { dp ->
-                                TokenPill(dp.label, config.density == dp, { app.prefsRepo.updateTheme { it.copy(density = dp) } }, Modifier.weight(1f))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(DensityPreset.entries) { dp ->
+                                TokenPill(dp.label, config.density == dp, { app.prefsRepo.updateTheme { it.copy(density = dp) } })
                             }
                         }
 
@@ -561,9 +561,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         }
 
                         Text("Motion Speed", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            MotionSpeed.entries.forEach { ms ->
-                                TokenPill(ms.label, config.motionSpeed == ms, { app.prefsRepo.updateTheme { it.copy(motionSpeed = ms) } }, Modifier.weight(1f))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(MotionSpeed.entries) { ms ->
+                                TokenPill(ms.label, config.motionSpeed == ms, { app.prefsRepo.updateTheme { it.copy(motionSpeed = ms) } })
                             }
                         }
 
@@ -779,9 +779,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         ) { Text("Apply Balances", fontWeight = FontWeight.ExtraBold) }
 
                         Text("Staking Strategy", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            StakingMode.entries.forEach { sm ->
-                                TokenPill(sm.label, prefs.stakingMode == sm, { app.prefsRepo.updatePrefs { it.copy(stakingMode = sm) } }, Modifier.weight(1f))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(StakingMode.entries) { sm ->
+                                TokenPill(sm.label, prefs.stakingMode == sm, { app.prefsRepo.updatePrefs { it.copy(stakingMode = sm) } })
                             }
                         }
 
@@ -793,9 +793,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         }
 
                         Text("Odds Display Format", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            OddsDisplayFormat.entries.forEach { fmt ->
-                                TokenPill(fmt.label, prefs.oddsFormat == fmt, { app.prefsRepo.updatePrefs { it.copy(oddsFormat = fmt) } }, Modifier.weight(1f))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(OddsDisplayFormat.entries) { fmt ->
+                                TokenPill(fmt.label, prefs.oddsFormat == fmt, { app.prefsRepo.updatePrefs { it.copy(oddsFormat = fmt) } })
                             }
                         }
                     }
@@ -878,7 +878,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         credits.forEach { line ->
                             Text("• $line", color = c.textSecondary, fontSize = scaledSp(12f))
                         }
-                        Text("EdgeLedger v6.0.0 · 100% On-Device & Local-Only Privacy", color = c.textMuted, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold)
+                        Text("EdgeLedger v6.2.0 · 100% On-Device & Local-Only Privacy", color = c.textMuted, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold)
                     }
                 }
             }

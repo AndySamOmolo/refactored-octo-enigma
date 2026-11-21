@@ -107,6 +107,36 @@ fun shortTeamName(fullName: String): String {
         "oklahoma city thunder" to "Thunder",
         "denver nuggets" to "Nuggets",
         "new york knicks" to "Knicks",
+        "portland trail blazers" to "Blazers",
+        "sacramento kings" to "Kings",
+        "philadelphia 76ers" to "76ers",
+        "milwaukee bucks" to "Bucks",
+        "dallas mavericks" to "Mavericks",
+        "la clippers" to "Clippers",
+        "los angeles clippers" to "Clippers",
+        "minnesota timberwolves" to "Wolves",
+        "memphis grizzlies" to "Grizzlies",
+        "san antonio spurs" to "Spurs",
+        "new orleans pelicans" to "Pelicans",
+        "phoenix suns" to "Suns",
+        "miami heat" to "Heat",
+        "cleveland cavaliers" to "Cavaliers",
+        "indiana pacers" to "Pacers",
+        "tampa bay buccaneers" to "Bucs",
+        "arizona cardinals" to "Cardinals",
+        "green bay packers" to "Packers",
+        "dallas cowboys" to "Cowboys",
+        "new england patriots" to "Patriots",
+        "los angeles rams" to "Rams",
+        "los angeles chargers" to "Chargers",
+        "new york giants" to "Giants",
+        "new york jets" to "Jets",
+        "los angeles dodgers" to "Dodgers",
+        "new york yankees" to "Yankees",
+        "atlanta braves" to "Braves",
+        "philadelphia phillies" to "Phillies",
+        "houston astros" to "Astros",
+        "boston red sox" to "Red Sox",
     )
     known[clean.lowercase(Locale.US)]?.let { return it }
     if (clean.length <= 13) return clean
@@ -143,7 +173,11 @@ fun SectionCard(
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = t.shapes.card,
-        color = if (useHeroGradient && t.config.useGradientHero) Color.Transparent else t.colors.surface,
+        color = when {
+            useHeroGradient && t.config.useGradientHero -> Color.Transparent
+            t.surfaceStyle == com.edgeledger.app.theme.SurfaceStyle.TONAL -> t.colors.surfaceTonal
+            else -> t.colors.surface
+        },
         shadowElevation = t.elevationDp,
         tonalElevation = if (t.elevationDp > 0.dp) 1.dp else 0.dp,
         border = border,
@@ -470,7 +504,7 @@ fun LineMovementChart(
                 }
             }
             if (steamCount > 0) {
-                StatusBadge("$steamCount Steam Move${if (steamCount > 1) "s" else ""}", c.oddsUp, c.winDim)
+                StatusBadge("$steamCount Steam Move${if (steamCount > 1) "s" else ""}", c.oddsUp, c.oddsUpDim)
             }
         }
 
@@ -603,7 +637,7 @@ fun PlayerPropCard(
         ) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(prop.playerName, color = c.text, fontSize = scaledSp(14f), fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(prop.playerName, color = c.text, fontSize = scaledSp(14f), fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Text("${prop.position} · ${shortTeamName(prop.team)}", color = c.textMuted, fontSize = scaledSp(11f), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Text("${prop.marketLabel}: ${prop.lineLabel}", color = c.accent, fontSize = scaledSp(13f), fontWeight = FontWeight.Bold)

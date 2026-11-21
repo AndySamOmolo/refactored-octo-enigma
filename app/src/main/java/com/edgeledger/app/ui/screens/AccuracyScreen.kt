@@ -76,11 +76,11 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
                     )
                 }
                 val approxWins = ((rec.accuracyScore / 100.0) * rec.gamesTested).roundToInt().coerceIn(0, rec.gamesTested)
-                val sig = OddsMath.computeSignificance(approxWins, rec.gamesTested, 0.50)
+                val sig = OddsMath.computeSignificance(approxWins, rec.gamesTested, if (rec.sport.hasDraw) 0.44 else 0.50)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MetricTile("Accuracy", "${rec.accuracyScore}/100", sig.plainLabel, Modifier.weight(1f))
-                    MetricTile("Games Tested", "${rec.gamesTested}", null, Modifier.weight(1f))
-                    MetricTile("Sim Profit", "${if (rec.simulatedProfitPct >= 0) "+" else ""}${rec.simulatedProfitPct}%", null, Modifier.weight(1f))
+                    MetricTile("Games", "${rec.gamesTested}", null, Modifier.weight(1f))
+                    MetricTile("Profit", "${if (rec.simulatedProfitPct >= 0) "+" else ""}${rec.simulatedProfitPct}%", null, Modifier.weight(1f))
                 }
                 if (rec.reliabilityBins.isNotEmpty()) {
                     Text("When we say X%, how often do they actually win?", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.SemiBold)
@@ -110,6 +110,32 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
                                 Text("Lock #${lp.hashSha256.take(10)} · ${lp.lockedAtIso.take(10)}", color = c.textMuted, fontSize = scaledSp(11f))
                             }
                             Text("${lp.chancePct}%", style = tabularStyle(13f, FontWeight.ExtraBold, c.accent))
+                        }
+                    }
+                }
+            }
+        }
+
+        // Live Prediction Markets (Polymarket & Kalshi)
+        if (snapshot.predictionMarkets.isNotEmpty()) {
+            item {
+                SectionCard {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("Live Markets (${snapshot.predictionMarkets.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f), modifier = Modifier.weight(1f))
+                        StatusBadge("Polymarket · Kalshi", c.sharpBadge, c.sharpBadgeDim)
+                    }
+                    Text("Live public implied probabilities synced directly on your phone.", color = c.textMuted, fontSize = scaledSp(12f))
+                    snapshot.predictionMarkets.take(12).forEach { pm ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(pm.question, color = c.text, fontSize = scaledSp(12.5f), fontWeight = FontWeight.Bold, maxLines = 2)
+                                Text(pm.source, color = c.accent, fontSize = scaledSp(11f), fontWeight = FontWeight.SemiBold)
+                            }
+                            StatusBadge("Yes ${pm.yesProbPct}%", c.win, c.winDim)
                         }
                     }
                 }

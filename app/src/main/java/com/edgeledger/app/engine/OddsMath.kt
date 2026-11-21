@@ -476,11 +476,11 @@ object OddsMath {
 
         val plainLabel = when {
             total < 10 -> "Small sample — keep tracking picks"
-            zScore > 0.0 && pValue < 0.01 -> "Strong edge — very unlikely to be luck"
-            zScore > 0.0 && pValue < 0.05 -> "Likely real skill — beats random chance"
+            zScore > 0.0 && pValue < 0.01 -> "Strong edge"
+            zScore > 0.0 && pValue < 0.05 -> "Real skill"
             zScore > 0.0 && pValue < 0.15 -> "Promising trend — needs more picks"
             zScore >= -1.0 -> "In line with random chance"
-            else -> "Below expected win rate"
+            else -> "Below avg"
         }
 
         return SignificanceResult(

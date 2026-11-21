@@ -48,8 +48,7 @@ import com.edgeledger.app.ui.screens.GamesScreen
 import com.edgeledger.app.ui.screens.MatchDetailScreen
 import com.edgeledger.app.ui.screens.PicksScreen
 import com.edgeledger.app.ui.screens.SettingsScreen
-import java.net.URLDecoder
-import java.net.URLEncoder
+import android.net.Uri
 
 private data class BottomTab(val route: String, val label: String, val icon: ImageVector)
 
@@ -179,7 +178,7 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
                     GamesScreen(
                         app = app,
                         onOpenMatch = { id ->
-                            val encoded = URLEncoder.encode(id, "UTF-8")
+                            val encoded = Uri.encode(id)
                             navController.navigate("match/$encoded")
                         },
                     )
@@ -193,11 +192,11 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
                     arguments = listOf(navArgument("matchId") { type = NavType.StringType }),
                 ) { entry ->
                     val raw = entry.arguments?.getString("matchId") ?: ""
-                    val decoded = runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+                    val decoded = runCatching { Uri.decode(raw) }.getOrDefault(raw)
                     MatchDetailScreen(
                         app = app,
                         matchId = decoded,
-                        onBack = { navController.popBackStack() },
+                        onBack = { navController.navigateUp() },
                     )
                 }
             }

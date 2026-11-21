@@ -41,7 +41,7 @@ fun EdgeLedgerTheme(
         }.getOrDefault(false)
     }
 
-    val isLight = config.mode == ThemeMode.LIGHT && !(config.batterySaverAutoAmoled && isPowerSaveMode)
+    val isLight = config.mode == ThemeMode.LIGHT
 
     val dynamicScheme = if (config.useDynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         if (isLight) dynamicLightColorScheme(context) else dynamicDarkColorScheme(context)

@@ -683,6 +683,90 @@ object PlayerPropsEngine {
         PropSpec(name, pos, "To Be Booked (Yellow Card)", mean, 0.0, 1.0, DistKind.POISSON_AT_LEAST, "Cards", inverseOpponentEffect = true)
 
     private fun nbaPropsFor(key: String, team: String): List<PropSpec> = when {
+        key.contains("76ers") || key.contains("philadelphia") -> listOf(
+            nbaPts("Joel Embiid", "C", 27.5, 6.2, 26.5),
+            nbaReb("Joel Embiid", "C", 10.8, 2.8, 10.5),
+            nbaAst("Tyrese Maxey", "PG", 6.4, 2.2, 5.5),
+            nbaThrees("Tyrese Maxey", "PG", 3.1, 2.5),
+        )
+        key.contains("bucks") || key.contains("milwaukee") -> listOf(
+            nbaPts("Giannis Antetokounmpo", "PF", 30.4, 6.4, 29.5),
+            nbaReb("Giannis Antetokounmpo", "PF", 11.6, 2.9, 11.5),
+            nbaAst("Damian Lillard", "PG", 7.1, 2.3, 6.5),
+            nbaThrees("Damian Lillard", "PG", 3.3, 2.5),
+        )
+        key.contains("kings") || key.contains("sacramento") -> listOf(
+            nbaPts("De'Aaron Fox", "PG", 26.2, 5.8, 25.5),
+            nbaReb("Domantas Sabonis", "C", 13.4, 3.0, 12.5),
+            nbaAst("Domantas Sabonis", "C", 7.2, 2.3, 6.5),
+            nbaThrees("Keegan Murray", "PF", 2.5, 2.5),
+        )
+        key.contains("blazers") || key.contains("portland") -> listOf(
+            nbaPts("Anfernee Simons", "SG", 20.8, 5.4, 19.5),
+            nbaReb("Deandre Ayton", "C", 10.6, 2.7, 9.5),
+            nbaAst("Scoot Henderson", "PG", 5.8, 2.1, 5.5),
+            nbaThrees("Anfernee Simons", "SG", 3.1, 2.5),
+        )
+        key.contains("mavericks") || key.contains("dallas") -> listOf(
+            nbaPts("Luka Doncic", "PG", 31.2, 6.6, 30.5),
+            nbaReb("Luka Doncic", "PG", 8.8, 2.5, 8.5),
+            nbaAst("Luka Doncic", "PG", 9.1, 2.6, 8.5),
+            nbaThrees("Kyrie Irving", "SG", 2.9, 2.5),
+        )
+        key.contains("clippers") -> listOf(
+            nbaPts("Kawhi Leonard", "SF", 23.4, 5.6, 22.5),
+            nbaReb("Ivica Zubac", "C", 11.4, 2.8, 10.5),
+            nbaAst("James Harden", "PG", 8.6, 2.5, 8.5),
+            nbaThrees("James Harden", "PG", 2.8, 2.5),
+        )
+        key.contains("timberwolves") || key.contains("minnesota") -> listOf(
+            nbaPts("Anthony Edwards", "SG", 27.4, 6.1, 26.5),
+            nbaReb("Rudy Gobert", "C", 11.8, 2.9, 11.5),
+            nbaAst("Mike Conley", "PG", 5.6, 2.0, 5.5),
+            nbaThrees("Anthony Edwards", "SG", 3.4, 2.5),
+        )
+        key.contains("grizzlies") || key.contains("memphis") -> listOf(
+            nbaPts("Ja Morant", "PG", 25.4, 5.9, 24.5),
+            nbaReb("Jaren Jackson Jr.", "PF", 6.5, 2.3, 6.5),
+            nbaAst("Ja Morant", "PG", 8.2, 2.4, 7.5),
+            nbaThrees("Desmond Bane", "SG", 3.0, 2.5),
+        )
+        key.contains("spurs") || key.contains("san antonio") -> listOf(
+            nbaPts("Victor Wembanyama", "C", 24.2, 5.8, 23.5),
+            nbaReb("Victor Wembanyama", "C", 10.8, 2.8, 10.5),
+            nbaAst("Chris Paul", "PG", 8.1, 2.4, 7.5),
+            nbaThrees("Devin Vassell", "SG", 2.5, 2.5),
+        )
+        key.contains("pelicans") || key.contains("new orleans") -> listOf(
+            nbaPts("Zion Williamson", "PF", 23.8, 5.7, 22.5),
+            nbaReb("Zion Williamson", "PF", 6.8, 2.3, 6.5),
+            nbaAst("Brandon Ingram", "SF", 5.4, 2.0, 5.5),
+            nbaThrees("CJ McCollum", "SG", 3.1, 2.5),
+        )
+        key.contains("suns") || key.contains("phoenix") -> listOf(
+            nbaPts("Kevin Durant", "PF", 27.2, 5.9, 26.5),
+            nbaReb("Jusuf Nurkic", "C", 9.8, 2.6, 9.5),
+            nbaAst("Devin Booker", "SG", 6.6, 2.2, 6.5),
+            nbaThrees("Devin Booker", "SG", 2.5, 2.5),
+        )
+        key.contains("heat") || key.contains("miami") -> listOf(
+            nbaPts("Tyler Herro", "SG", 21.8, 5.4, 21.5),
+            nbaReb("Bam Adebayo", "C", 10.2, 2.7, 9.5),
+            nbaAst("Jimmy Butler", "SF", 5.2, 2.0, 4.5),
+            nbaThrees("Tyler Herro", "SG", 3.2, 2.5),
+        )
+        key.contains("cavaliers") || key.contains("cleveland") -> listOf(
+            nbaPts("Donovan Mitchell", "SG", 25.8, 5.9, 25.5),
+            nbaReb("Evan Mobley", "PF", 9.4, 2.5, 9.5),
+            nbaAst("Darius Garland", "PG", 6.8, 2.2, 6.5),
+            nbaThrees("Donovan Mitchell", "SG", 3.3, 2.5),
+        )
+        key.contains("pacers") || key.contains("indiana") -> listOf(
+            nbaPts("Pascal Siakam", "PF", 21.4, 5.2, 20.5),
+            nbaReb("Myles Turner", "C", 7.2, 2.3, 7.5),
+            nbaAst("Tyrese Haliburton", "PG", 9.6, 2.7, 9.5),
+            nbaThrees("Tyrese Haliburton", "PG", 3.0, 2.5),
+        )
         key.contains("celtics") || key.contains("boston") -> listOf(
             nbaPts("Jayson Tatum", "SF", 27.6, 6.2, 26.5),
             nbaReb("Kristaps Porzingis", "C", 7.8, 2.5, 7.5),

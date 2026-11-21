@@ -22,9 +22,54 @@ import kotlin.math.sqrt
 object PredictionEngine {
     private val FACTORIALS = doubleArrayOf(1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0, 40320.0)
 
-    fun eloToPowerScore(elo: Double): Int {
-        val clamped = elo.coerceIn(1200.0, 2150.0)
-        return (((clamped - 1200.0) / (2150.0 - 1200.0)) * 99.0).roundToInt().coerceIn(1, 99)
+    fun eloToPowerScore(
+        elo: Double,
+        sport: Sport = Sport.FOOTBALL,
+        isClubEloAnchored: Boolean = (sport == Sport.FOOTBALL && elo > 1680.0),
+    ): Int {
+        val (minElo, maxElo) = if (isClubEloAnchored) 1300.0 to 2100.0 else 1200.0 to 1800.0
+        val clamped = elo.coerceIn(minElo, maxElo)
+        return (((clamped - minElo) / (maxElo - minElo)) * 98.0 + 1.0).roundToInt().coerceIn(1, 99)
+    }
+
+    private fun normalInvCdf(p: Double): Double {
+        val x = p.coerceIn(1e-6, 1.0 - 1e-6)
+        val a = doubleArrayOf(
+            -3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+            1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00
+        )
+        val b = doubleArrayOf(
+            -5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+            6.680131188771972e+01, -1.328068155288572e+01
+        )
+        val c = doubleArrayOf(
+            -7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+            -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00
+        )
+        val d = doubleArrayOf(
+            7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+            3.754408661907416e+00
+        )
+        val pLow = 0.02425
+        val pHigh = 1.0 - pLow
+        return when {
+            x < pLow -> {
+                val q = sqrt(-2.0 * ln(x))
+                (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+                    ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+            }
+            x <= pHigh -> {
+                val q = x - 0.5
+                val r = q * q
+                (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+                    (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+            }
+            else -> {
+                val q = sqrt(-2.0 * ln(1.0 - x))
+                -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+                    ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+            }
+        }
     }
 
     fun expectedEloScore(ratingA: Double, ratingB: Double): Double =
@@ -81,7 +126,7 @@ object PredictionEngine {
         matches: List<HistoricalMatch>,
         clubEloMap: Map<String, Double> = emptyMap(),
     ): Map<String, TeamProfile> {
-        val sorted = matches.sortedBy { it.dateIso }
+        val sorted = matches.distinctBy { "${it.sport.name}|${it.dateIso}|${it.homeTeam}|${it.awayTeam}" }.sortedBy { it.dateIso }
 
         class Acc(val team: String, val sport: Sport, val leagueId: String, var elo: Double) {
             var gp = 0; var w = 0; var d = 0; var l = 0
@@ -175,7 +220,7 @@ object PredictionEngine {
                         }
                     }
                     m.totalLine?.let { tl ->
-                        if (m.homeScore + m.awayScore != tl.toInt()) {
+                        if ((m.homeScore + m.awayScore).toDouble() != tl) {
                             acc.totN++
                             if (m.homeScore + m.awayScore > tl) acc.overTot++
                         }
@@ -208,7 +253,7 @@ object PredictionEngine {
                 leagueId = acc.leagueId,
                 elo = finalElo,
                 clubElo = clubAnchor,
-                powerScore = eloToPowerScore(finalElo),
+                powerScore = eloToPowerScore(finalElo, acc.sport, isClubEloAnchored = clubAnchor != null),
                 gamesPlayed = acc.gp,
                 wins = acc.w,
                 draws = acc.d,
@@ -487,20 +532,108 @@ object PredictionEngine {
         val otBase = cfg[7] as Double
         val unit = cfg[8] as String
 
-        val pH = ((homeProfile?.avgScored ?: defScoreH) + (awayProfile?.avgConceded ?: defScoreA)) / 2.0
-        val pA = ((awayProfile?.avgScored ?: defScoreA) + (homeProfile?.avgConceded ?: defScoreH)) / 2.0
-        val margin = pH - pA
-        val total = pH + pA
+        val rawH = ((homeProfile?.avgScored ?: defScoreH) + (awayProfile?.avgConceded ?: defScoreA)) / 2.0
+        val rawA = ((awayProfile?.avgScored ?: defScoreA) + (homeProfile?.avgConceded ?: defScoreH)) / 2.0
+        val total = (rawH + rawA).coerceAtLeast(if (sport == Sport.F1 || sport == Sport.MMA) 1.0 else 2.0)
+
+        val probImpliedMargin = normalInvCdf(winH.coerceIn(0.03, 0.97)) * marginSd
+        val rawMargin = rawH - rawA
+        val hasBothProfiles = (homeProfile?.gamesPlayed ?: 0) >= 4 && (awayProfile?.gamesPlayed ?: 0) >= 4
+        val sameDirection = rawMargin * probImpliedMargin > 0.0
+        val blendedMargin = if (hasBothProfiles && sameDirection) {
+            rawMargin * 0.35 + probImpliedMargin * 0.65
+        } else {
+            probImpliedMargin
+        }
+
+        val isDecimalScore = sport == Sport.NHL || sport == Sport.MLB
+        val isH2hSport = sport == Sport.F1 || sport == Sport.MMA
+        val minCoherentMargin = when {
+            isH2hSport -> 0.05
+            isDecimalScore -> 0.15
+            else -> 1.0
+        }
+        val margin = when {
+            winH >= 0.515 -> max(blendedMargin, minCoherentMargin)
+            winH <= 0.485 -> min(blendedMargin, -minCoherentMargin)
+            else -> blendedMargin
+        }
+
+        val pH = ((total + margin) / 2.0).coerceAtLeast(0.0)
+        val pA = ((total - margin) / 2.0).coerceAtLeast(0.0)
         val line = total.toInt() + 0.5
-        val overP = 1.0 - normalCdf(line, total, totalSd)
+        val overP = (1.0 - normalCdf(line, total, totalSd)).coerceIn(0.05, 0.95)
+        val underP = 1.0 - overP
+
         val fav = if (winH >= 0.5) homeTeam else awayTeam
+        val dog = if (winH >= 0.5) awayTeam else homeTeam
         val favProb = max(winH, 1.0 - winH)
-        val altP = (1.0 - normalCdf(altSpreadVal, abs(margin), marginSd)).coerceIn(0.12, 0.90)
+
+        // Always recommend the higher-probability side of the alternate spread (fav -X vs dog +X)
+        val favCoverProb = (1.0 - normalCdf(altSpreadVal, abs(margin), marginSd)).coerceIn(0.10, 0.90)
+        val dogCoverProb = 1.0 - favCoverProb
+        val pickFavSpread = favCoverProb >= 0.5
+        val spreadLabel = if (pickFavSpread) "$fav -$altSpreadVal" else "$dog +$altSpreadVal"
+        val spreadProb = if (pickFavSpread) favCoverProb else dogCoverProb
+        val spreadReason = if (pickFavSpread) {
+            "Projected margin favors $fav by ${String.format("%.1f", abs(margin))}, clearing -$altSpreadVal."
+        } else {
+            "Projected margin of ${String.format("%.1f", abs(margin))} stays inside the +$altSpreadVal cushion for $dog."
+        }
+
+        val pickOver = overP >= 0.5
+        val totalPickProb = max(overP, underP)
+        val totalPickLabel = "${if (pickOver) "Over" else "Under"} $line $unit"
+
         val closeP = (normalCdf(closeBand, margin, marginSd) - normalCdf(-closeBand, margin, marginSd)).coerceIn(0.15, 0.85)
         val otP = (otBase * exp(-((margin / marginSd).pow(2)))).coerceIn(0.03, 0.28)
-        val decFmt = if (sport == Sport.NHL || sport == Sport.MLB) "%.1f" else "%.0f"
-        val scoreDisp = "${String.format(decFmt, pH)} – ${String.format(decFmt, pA)}"
+        val decFmt = if (isDecimalScore) "%.1f" else "%.0f"
+        val scoreDisp = if (isH2hSport) {
+            "${toPct(winH)}% – ${toPct(1.0 - winH)}%"
+        } else {
+            "${String.format(decFmt, pH)} – ${String.format(decFmt, pA)}"
+        }
         val htDisp = "${String.format(decFmt, pH * 0.49)} – ${String.format(decFmt, pA * 0.49)}"
+        val absMarginSafe = max(0.5, abs(margin))
+
+        val rankedPicks = buildList {
+            add(
+                MarketPickItem(
+                    id = "${sport.name}_w",
+                    category = "Match Result",
+                    label = "$fav to Win",
+                    chancePct = toPct(favProb),
+                    confidence = conf(favProb),
+                    plainReason = if (isH2hSport) {
+                        "Head-to-head edge based on recent race/fight form and ratings."
+                    } else {
+                        "Projected score $scoreDisp based on ratings and scoring pace."
+                    },
+                )
+            )
+            if (!isH2hSport) {
+                add(
+                    MarketPickItem(
+                        id = "${sport.name}_sp",
+                        category = "Spread",
+                        label = spreadLabel,
+                        chancePct = toPct(spreadProb),
+                        confidence = conf(spreadProb),
+                        plainReason = spreadReason,
+                    )
+                )
+                add(
+                    MarketPickItem(
+                        id = "${sport.name}_tot",
+                        category = "Total",
+                        label = totalPickLabel,
+                        chancePct = toPct(totalPickProb),
+                        confidence = conf(totalPickProb),
+                        plainReason = "Combined scoring pace projects ${String.format("%.1f", total)} $unit.",
+                    )
+                )
+            }
+        }.sortedByDescending { it.chancePct }
 
         return FullMatchMarkets(
             projectedHome = pH,
@@ -509,21 +642,17 @@ object PredictionEngine {
             probDraw = 0.0,
             probAway = 1.0 - winH,
             projectedScoreDisplay = scoreDisp,
-            projectedSpreadDisplay = "$fav -${String.format("%.1f", abs(margin))}",
-            altSpreadLabel = "$fav -$altSpreadVal",
-            altSpreadPct = toPct(altP),
+            projectedSpreadDisplay = if (isH2hSport) "$fav Edge" else "$fav -${String.format("%.1f", absMarginSafe)}",
+            altSpreadLabel = spreadLabel,
+            altSpreadPct = toPct(spreadProb),
             projectedTotal = total,
             totalLine = line,
             totalOverPct = toPct(overP),
             halftimeDisplay = htDisp,
-            closeGameLabel = closeLabel as String,
+            closeGameLabel = closeLabel,
             closeGamePct = toPct(closeP),
             overtimeChancePct = toPct(otP),
-            topPicks = listOf(
-                MarketPickItem("${sport.name}_w", "Match Result", "$fav to Win", toPct(favProb), conf(favProb), "Projected score $scoreDisp based on current scoring and defense."),
-                MarketPickItem("${sport.name}_sp", "Spread", "$fav -$altSpreadVal", toPct(altP), conf(altP), "Projected margin favors $fav by ${String.format("%.1f", abs(margin))}."),
-                MarketPickItem("${sport.name}_tot", "Total", "${if (overP >= 0.5) "Over" else "Under"} $line ${unit as String}", toPct(max(overP, 1.0 - overP)), conf(max(overP, 1.0 - overP)), "Combined scoring pace projects ${String.format("%.1f", total)}."),
-            ),
+            topPicks = rankedPicks,
         )
     }
 
@@ -570,10 +699,14 @@ object PredictionEngine {
         leagueName: String,
         matches: List<HistoricalMatch>,
     ): LeagueTrackRecord {
-        val sorted = matches.sortedBy { it.dateIso }
+        val sorted = matches
+            .distinctBy { "${it.sport.name}|${it.dateIso}|${it.homeTeam}|${it.awayTeam}" }
+            .sortedBy { it.dateIso }
         val elo = mutableMapOf<String, Double>()
         val warmup = min(15, sorted.size / 4)
         val hAdv = homeAdvFor(sport)
+        val kFactor = if (sport == Sport.TENNIS || sport == Sport.MMA) 28.0 else 22.0
+
         var n = 0
         var modelErr = 0.0
         var baseErr = 0.0
@@ -583,41 +716,75 @@ object PredictionEngine {
         val binCounts = IntArray(5)
 
         for ((idx, m) in sorted.withIndex()) {
-            val rH = elo[m.homeTeam] ?: 1500.0
-            val rA = elo[m.awayTeam] ?: 1500.0
-            val rawH = expectedEloScore(rH + hAdv, rA)
-            val yH = if (m.homeScore > m.awayScore) 1.0 else 0.0
-            val yD = if (m.homeScore == m.awayScore) 1.0 else 0.0
+            val flipSide = sport == Sport.TENNIS && (idx % 2 == 1)
+            val teamA = if (flipSide) m.awayTeam else m.homeTeam
+            val teamB = if (flipSide) m.homeTeam else m.awayTeam
+            val scoreA = if (flipSide) m.awayScore else m.homeScore
+            val scoreB = if (flipSide) m.homeScore else m.awayScore
+            val oddsA = if (flipSide) m.oddsAway else m.oddsHome
+            val oddsB = if (flipSide) m.oddsHome else m.oddsAway
+
+            val rA = elo[teamA] ?: 1500.0
+            val rB = elo[teamB] ?: 1500.0
+            val expScoreA = expectedEloScore(rA + hAdv, rB)
+
+            val (pA, pD, pB) = if (sport.hasDraw) {
+                val drawP = (0.28 * exp(-(((rA + hAdv - rB) / 360.0).pow(2)))).coerceIn(0.10, 0.32)
+                val winA = (expScoreA - 0.5 * drawP).coerceIn(0.03, 0.94)
+                val winB = (1.0 - winA - drawP).coerceIn(0.03, 0.94)
+                Triple(winA, drawP, winB)
+            } else {
+                Triple(expScoreA, 0.0, 1.0 - expScoreA)
+            }
+
+            val yA = if (scoreA > scoreB) 1.0 else 0.0
+            val yD = if (scoreA == scoreB) 1.0 else 0.0
+            val yB = if (scoreB > scoreA) 1.0 else 0.0
 
             if (idx >= warmup) {
                 n++
-                modelErr += (rawH - yH).pow(2)
-                baseErr += (0.52 - yH).pow(2)
-                val bIdx = (rawH * 5.0).toInt().coerceIn(0, 4)
-                binCounts[bIdx]++
-                if (yH == 1.0) binHits[bIdx]++
+                if (sport.hasDraw) {
+                    modelErr += ((pA - yA).pow(2) + (pD - yD).pow(2) + (pB - yB).pow(2)) / 2.0
+                    baseErr += ((0.44 - yA).pow(2) + (0.26 - yD).pow(2) + (0.30 - yB).pow(2)) / 2.0
+                } else {
+                    modelErr += (pA - yA).pow(2)
+                    val baseP = if (hAdv > 0.0) 0.54 else 0.50
+                    baseErr += (baseP - yA).pow(2)
+                }
 
-                val oH = m.oddsHome
-                if (oH != null && oH > 1.05) {
-                    val ev = OddsMath.expectedValue(rawH, oH)
-                    if (ev >= 0.03) {
-                        val stake = bankroll * OddsMath.fractionalKelly(rawH, oH, 0.25, 0.05)
+                val bIdx = (pA * 5.0).toInt().coerceIn(0, 4)
+                binCounts[bIdx]++
+                if (yA == 1.0) binHits[bIdx]++
+
+                if (bankroll > 10.0) {
+                    val candidates = buildList {
+                        if (oddsA != null && oddsA in 1.10..10.0) add(Triple(pA, oddsA, yA == 1.0))
+                        if (oddsB != null && oddsB in 1.10..10.0) add(Triple(pB, oddsB, yB == 1.0))
+                    }
+                    val best = candidates.maxByOrNull { OddsMath.expectedValue(it.first, it.second) }
+                    if (best != null && OddsMath.expectedValue(best.first, best.second) >= 0.03) {
+                        val stake = bankroll * OddsMath.fractionalKelly(best.first, best.second, 0.25, 0.04)
                         staked += stake
-                        bankroll += if (yH == 1.0) stake * (oH - 1.0) else -stake
+                        bankroll += if (best.third) stake * (best.second - 1.0) else -stake
                     }
                 }
             }
 
-            val actual = if (yH == 1.0) 1.0 else if (yD == 1.0) 0.5 else 0.0
-            val d = 22.0 * (actual - rawH)
-            elo[m.homeTeam] = rH + d
-            elo[m.awayTeam] = rA - d
+            val actual = when {
+                yA == 1.0 -> 1.0
+                yD == 1.0 -> 0.5
+                else -> 0.0
+            }
+            val mov = if (scoreA == scoreB) 1.0 else ln(abs(scoreA - scoreB) + 1.0) * 0.35 + 0.85
+            val delta = kFactor * mov * (actual - expScoreA)
+            elo[teamA] = rA + delta
+            elo[teamB] = rB - delta
         }
 
         val denom = max(1, n).toDouble()
         val mBrier = modelErr / denom
         val bBrier = baseErr / denom
-        val accScore = ((1.0 - mBrier * 0.75) * 100.0).roundToInt().coerceIn(45, 98)
+        val accScore = ((1.0 - mBrier) * 100.0).roundToInt().coerceIn(45, 98)
         val roi = if (staked > 0.0) ((bankroll - 1000.0) / staked) * 100.0 else 0.0
         val labels = listOf("0-20%", "20-40%", "40-60%", "60-80%", "80-100%")
         val bins = (0..4).filter { binCounts[it] > 0 }.map { i ->

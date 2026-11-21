@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import com.edgeledger.app.data.SeedData
 import com.edgeledger.app.data.SyncRepository
 import com.edgeledger.app.data.UserApiKeys
+import com.edgeledger.app.engine.CsvAndFeedParsers
 import com.edgeledger.app.engine.DevigMethod
 import com.edgeledger.app.engine.OddsMath
 import com.edgeledger.app.engine.PlayerPropsEngine
@@ -96,6 +97,10 @@ class EdgeLedgerEngineTest {
         assertEquals("A. Villa", shortTeamName("Aston Villa"))
         assertEquals("Premier League", SyncRepository.readableLeagueName("E0", Sport.FOOTBALL))
         assertEquals("La Liga", SyncRepository.readableLeagueName("SP1", Sport.FOOTBALL))
+        assertEquals("Formula 1", SyncRepository.readableLeagueName("F1", Sport.F1))
+        assertEquals("Ligue 1", SyncRepository.readableLeagueName("F1", Sport.FOOTBALL))
+        assertEquals("Blazers", shortTeamName("Portland Trail Blazers"))
+        assertEquals("Bucs", shortTeamName("Tampa Bay Buccaneers"))
     }
 
     @Test
@@ -120,6 +125,7 @@ class EdgeLedgerEngineTest {
             val res = PredictionEngine.predictAllMarkets(sp, "Home", "Away", null, null)
             assertEquals(1.0, res.probHome + res.probAway, 0.02)
             assertTrue(res.topPicks.isNotEmpty())
+            assertFalse(res.projectedSpreadDisplay.contains("-0.0"))
         }
     }
 
@@ -139,6 +145,29 @@ class EdgeLedgerEngineTest {
         for (mode in ThemeMode.entries) {
             val tokens = resolveTokens(ThemeConfigV1(mode = mode, surfaceStyle = SurfaceStyle.ELEVATED))
             assertTrue(tokens.textSurfaceContrast >= 7.0f)
+        }
+    }
+
+    @Test
+    fun nflAndNhlCrosswalksPowerCalibrationAndLightModeWork() {
+        assertEquals("Kansas City Chiefs", CsvAndFeedParsers.canonicalTeam("KC", Sport.NFL))
+        assertEquals("Detroit Lions", CsvAndFeedParsers.canonicalTeam("DET", Sport.NFL))
+        assertEquals("Tampa Bay Buccaneers", CsvAndFeedParsers.canonicalTeam("TB", Sport.NFL))
+        assertEquals("Detroit Red Wings", CsvAndFeedParsers.canonicalTeam("DET", Sport.NHL))
+        assertEquals("New York Rangers", CsvAndFeedParsers.canonicalTeam("NYR", Sport.NHL))
+        assertEquals("New York Islanders", CsvAndFeedParsers.canonicalTeam("NYI", Sport.NHL))
+
+        // Neutral 1500 Elo on non-football sport maps to ~50/99 (not 31/99!)
+        assertEquals(50, PredictionEngine.eloToPowerScore(1500.0, Sport.TENNIS, false))
+
+        // Crisp Daylight Light mode stays Light even when Battery Saver is active
+        val lightTokens = resolveTokens(ThemeConfigV1(mode = ThemeMode.LIGHT), isBatterySaverActive = true)
+        assertFalse(lightTokens.isDark)
+
+        // US sports topPicks always recommend >= 50% side of spread/total
+        val nba = PredictionEngine.predictAllMarkets(Sport.NBA, "Philadelphia 76ers", "Milwaukee Bucks", null, null)
+        nba.topPicks.forEach { pk ->
+            assertTrue("Expected pick >= 50%, got ${pk.label} (${pk.chancePct}%)", pk.chancePct >= 50)
         }
     }
 }

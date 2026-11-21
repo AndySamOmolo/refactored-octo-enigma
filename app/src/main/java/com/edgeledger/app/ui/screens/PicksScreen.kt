@@ -120,11 +120,11 @@ fun PicksScreen(app: EdgeLedgerApp) {
                     modifier = Modifier.weight(1f),
                 )
                 TokenPill(
-                    label = "Paper Trading (Virtual)",
+                    label = "Paper (Virtual)",
                     selected = isPaper,
                     onClick = { app.prefsRepo.updatePrefs { it.copy(isPaperTrading = true) } },
                     activeColor = c.sharpBadge,
-                    activeContainer = c.accentDim,
+                    activeContainer = c.sharpBadgeDim,
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -186,7 +186,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
                             "WON", "HALF_WIN" -> c.win to c.winDim
                             "LOST", "HALF_LOSS" -> c.loss to c.lossDim
                             "PUSH", "VOID" -> c.textSecondary to c.surfaceRaised
-                            else -> c.pending to c.drawDim
+                            else -> c.pending to c.pendingDim
                         }
                         StatusBadge(bet.status.replace("_", " "), stColor, stDim)
                     }

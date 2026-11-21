@@ -135,7 +135,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
                             TeamAvatar(home?.team ?: "Home", size = 44.dp)
                             Text("HOME · TAP", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
                             Text(home?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                            StatusBadge("Power ${home?.powerScore ?: 55}/99", c.accent, c.accentDim)
+                            StatusBadge("Power ${home?.powerScore ?: 50}/99", c.accent, c.accentDim)
                         }
                     }
                     Surface(
@@ -153,7 +153,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
                             TeamAvatar(away?.team ?: "Away", size = 44.dp)
                             Text("AWAY · TAP", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
                             Text(away?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                            StatusBadge("Power ${away?.powerScore ?: 55}/99", c.accent, c.accentDim)
+                            StatusBadge("Power ${away?.powerScore ?: 50}/99", c.accent, c.accentDim)
                         }
                     }
                 }
@@ -247,7 +247,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
             val l3 = max(1.01, leg3Odds.toDoubleOrNull() ?: 2.10)
             val st = max(1.0, parlayStake.toDoubleOrNull() ?: 25.0)
             val parlay = OddsMath.calculateParlay(
-                listOf(l1 to (1.0 / l1), l2 to (1.0 / l2), l3 to (1.0 / l3)),
+                listOf(l1 to (1.0 / (l1 * 1.045)), l2 to (1.0 / (l2 * 1.045)), l3 to (1.0 / (l3 * 1.045))),
                 st,
             )
 
@@ -279,7 +279,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
 
             SectionCard {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Arbitrage & Hedge Calculator", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
+                    Text("Arbitrage & Hedge", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f), modifier = Modifier.weight(1f))
                     StatusBadge(
                         text = if (arb.isArbitrage) "Arb +${String.format("%.2f", arb.profitPct)}%" else "No Arb (${String.format("%.1f", arb.profitPct)}%)",
                         color = if (arb.isArbitrage) c.win else c.textMuted,
@@ -287,9 +287,9 @@ fun CompareScreen(app: EdgeLedgerApp) {
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = arbOddsA, onValueChange = { arbOddsA = it }, label = { Text("Side A Odds") }, singleLine = true, modifier = Modifier.weight(1f))
-                    OutlinedTextField(value = arbOddsB, onValueChange = { arbOddsB = it }, label = { Text("Side B Odds") }, singleLine = true, modifier = Modifier.weight(1f))
-                    OutlinedTextField(value = arbStake, onValueChange = { arbStake = it }, label = { Text("Total ($)") }, singleLine = true, modifier = Modifier.weight(1f))
+                    OutlinedTextField(value = arbOddsA, onValueChange = { arbOddsA = it }, label = { Text("Odds A") }, singleLine = true, modifier = Modifier.weight(1f))
+                    OutlinedTextField(value = arbOddsB, onValueChange = { arbOddsB = it }, label = { Text("Odds B") }, singleLine = true, modifier = Modifier.weight(1f))
+                    OutlinedTextField(value = arbStake, onValueChange = { arbStake = it }, label = { Text("Stake ($)") }, singleLine = true, modifier = Modifier.weight(1f))
                 }
                 Text(
                     "Split: $${String.format("%.2f", arb.stakeA)} on Side A · $${String.format("%.2f", arb.stakeB)} on Side B → Return $${String.format("%.2f", arb.guaranteedPayout)} (${if (arb.guaranteedProfit >= 0) "+" else ""}$${String.format("%.2f", arb.guaranteedProfit)})",

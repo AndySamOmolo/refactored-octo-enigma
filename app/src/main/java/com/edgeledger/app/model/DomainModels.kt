@@ -293,3 +293,11 @@ data class ProviderHealth(
     val lastUpdatedIso: String,
     val note: String,
 )
+
+@Serializable
+data class PredictionMarketQuote(
+    val source: String, // "Polymarket" or "Kalshi"
+    val question: String,
+    val yesProbPct: Int,
+    val noProbPct: Int,
+)

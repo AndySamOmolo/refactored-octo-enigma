@@ -59,6 +59,7 @@ import com.edgeledger.app.ui.components.shortTeamName
 import com.edgeledger.app.ui.components.tabularStyle
 import kotlinx.coroutines.launch
 import java.time.Instant
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -108,9 +109,12 @@ fun MatchDetailScreen(
         val m = fixture.markets
         val firstLine = fixture.bookmakerOdds.firstOrNull()
 
-        var homeOddsStr by remember(fixture.id) { mutableStateOf(String.format("%.2f", firstLine?.homeOdds ?: 2.00)) }
-        var drawOddsStr by remember(fixture.id) { mutableStateOf(String.format("%.2f", firstLine?.drawOdds ?: 3.40)) }
-        var awayOddsStr by remember(fixture.id) { mutableStateOf(String.format("%.2f", firstLine?.awayOdds ?: 3.50)) }
+        val defHomeOdds = firstLine?.homeOdds ?: (1.0 / (m.probHome.coerceAtLeast(0.05) * 1.045)).coerceIn(1.05, 25.0)
+        val defDrawOdds = firstLine?.drawOdds ?: if (fixture.sport.hasDraw && m.probDraw > 0.03) (1.0 / (m.probDraw * 1.045)).coerceIn(1.50, 25.0) else 3.40
+        val defAwayOdds = firstLine?.awayOdds ?: (1.0 / (m.probAway.coerceAtLeast(0.05) * 1.045)).coerceIn(1.05, 25.0)
+        var homeOddsStr by remember(fixture.id, firstLine) { mutableStateOf(String.format(Locale.US, "%.2f", defHomeOdds)) }
+        var drawOddsStr by remember(fixture.id, firstLine) { mutableStateOf(String.format(Locale.US, "%.2f", defDrawOdds)) }
+        var awayOddsStr by remember(fixture.id, firstLine) { mutableStateOf(String.format(Locale.US, "%.2f", defAwayOdds)) }
 
         fun savePick(label: String, odds: Double, chance: Double, stakeFrac: Double) {
             val activeBankroll = if (prefs.isPaperTrading) prefs.paperBankroll else prefs.bankroll
@@ -167,7 +171,7 @@ fun MatchDetailScreen(
                         Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(5.dp)) {
                             TeamAvatar(fixture.homeTeam, size = 48.dp)
                             Text(fixture.homeTeam, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp, textAlign = TextAlign.Center)
-                            Text("Power ${pH?.powerScore ?: 55}/99", color = c.textSecondary, fontSize = 11.sp)
+                            Text("Power ${pH?.powerScore ?: 50}/99", color = c.textSecondary, fontSize = 11.sp)
                             FormDots(pH?.recentForm.orEmpty())
                         }
                         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 6.dp)) {
@@ -188,7 +192,7 @@ fun MatchDetailScreen(
                         Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(5.dp)) {
                             TeamAvatar(fixture.awayTeam, size = 48.dp)
                             Text(fixture.awayTeam, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = 13.5.sp, textAlign = TextAlign.Center)
-                            Text("Power ${pA?.powerScore ?: 55}/99", color = c.textSecondary, fontSize = 11.sp)
+                            Text("Power ${pA?.powerScore ?: 50}/99", color = c.textSecondary, fontSize = 11.sp)
                             FormDots(pA?.recentForm.orEmpty())
                         }
                     }
@@ -203,13 +207,14 @@ fun MatchDetailScreen(
                     if (fixture.homeRangeLowPct > 0 && fixture.homeRangeHighPct > 0) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                "80% confidence range (${shortTeamName(fixture.homeTeam)}): ${fixture.homeRangeLowPct}% – ${fixture.homeRangeHighPct}%",
+                                "80% range (${shortTeamName(fixture.homeTeam)}): ${fixture.homeRangeLowPct}%–${fixture.homeRangeHighPct}%",
                                 color = c.textMuted,
                                 fontSize = scaledSp(11.5f),
                                 fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f),
                             )
                             if (fixture.marketHoldPct > 0.0) {
-                                StatusBadge("Vig ${String.format("%.1f", fixture.marketHoldPct)}%", c.sharpBadge, c.accentDim)
+                                StatusBadge("Vig ${String.format(Locale.US, "%.1f", fixture.marketHoldPct)}%", c.sharpBadge, c.sharpBadgeDim)
                             }
                         }
                     }
@@ -302,7 +307,7 @@ fun MatchDetailScreen(
                                     shape = RoundedCornerShape(tokens.cornerSm),
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 ) {
-                                    Text("Save", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text("Save", color = c.onAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -453,7 +458,7 @@ fun MatchDetailScreen(
                                     colors = ButtonDefaults.buttonColors(containerColor = c.accent),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 ) {
-                                    Text("Save", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Text("Save", color = c.onAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }

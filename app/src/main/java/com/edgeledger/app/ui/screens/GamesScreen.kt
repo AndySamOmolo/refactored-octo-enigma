@@ -60,7 +60,16 @@ import com.edgeledger.app.ui.components.shortTeamName
 import com.edgeledger.app.ui.components.tabularStyle
 import kotlinx.coroutines.launch
 import java.time.Instant
+import kotlin.math.abs
 import kotlin.math.roundToInt
+
+private enum class GameSortMode(val label: String) {
+    BEST_PICK("Sort: Best Pick %"),
+    KICKOFF("Sort: Kickoff Time"),
+    BEST_VALUE("Sort: Best Value"),
+    CLOSEST("Sort: Closest"),
+    POWER_GAP("Sort: Power Gap"),
+}
 
 @Composable
 fun GamesScreen(
@@ -79,14 +88,26 @@ fun GamesScreen(
     var strongOnly by remember { mutableStateOf(false) }
     var valueOnly by remember { mutableStateOf(false) }
     var favoritesOnly by remember { mutableStateOf(false) }
+    var sortMode by remember { mutableStateOf(GameSortMode.BEST_PICK) }
 
-    val daysOld = ((Instant.now().toEpochMilli() - snapshot.lastSyncEpochMs) / 86_400_000L).coerceAtLeast(0L)
-    val filtered = remember(snapshot.fixtures, selectedSport, strongOnly, valueOnly, favoritesOnly, prefs.pinnedTeams) {
-        snapshot.fixtures.filter { fx ->
+    val daysOld = if (snapshot.lastSyncEpochMs <= 0L) 0L else ((Instant.now().toEpochMilli() - snapshot.lastSyncEpochMs) / 86_400_000L).coerceAtLeast(0L)
+    val filtered = remember(snapshot.fixtures, snapshot.profiles, selectedSport, strongOnly, valueOnly, favoritesOnly, prefs.pinnedTeams, sortMode) {
+        val base = snapshot.fixtures.filter { fx ->
             (selectedSport == null || fx.sport == selectedSport) &&
                 (!strongOnly || fx.markets.topPicks.any { it.confidence == ConfidenceLevel.STRONG }) &&
                 (!valueOnly || fx.bestValueLabel != null) &&
                 (!favoritesOnly || fx.homeTeam in prefs.pinnedTeams || fx.awayTeam in prefs.pinnedTeams)
+        }
+        when (sortMode) {
+            GameSortMode.BEST_PICK -> base.sortedByDescending { it.markets.topPicks.firstOrNull()?.chancePct ?: 0 }
+            GameSortMode.KICKOFF -> base.sortedBy { it.kickoffIso }
+            GameSortMode.BEST_VALUE -> base.sortedByDescending { it.bestValueEdgePct ?: -99.0 }
+            GameSortMode.CLOSEST -> base.sortedBy { abs(it.markets.probHome - it.markets.probAway) }
+            GameSortMode.POWER_GAP -> base.sortedByDescending { fx ->
+                val hp = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]?.powerScore ?: 50
+                val ap = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.awayTeam)]?.powerScore ?: 50
+                abs(hp - ap)
+            }
         }
     }
 
@@ -163,13 +184,29 @@ fun GamesScreen(
                 TokenPill("Favorites (${prefs.pinnedTeams.size})", favoritesOnly, { favoritesOnly = !favoritesOnly }, activeColor = c.draw, activeContainer = c.drawDim)
             }
             item {
-                TokenPill("Good Value", valueOnly, { valueOnly = !valueOnly }, activeColor = c.valueHighlight, activeContainer = c.winDim)
+                TokenPill("Good Value", valueOnly, { valueOnly = !valueOnly }, activeColor = c.valueHighlight, activeContainer = c.valueHighlightDim)
             }
             item {
                 TokenPill("Strong Picks", strongOnly, { strongOnly = !strongOnly }, activeColor = c.win, activeContainer = c.winDim)
             }
             items(Sport.entries) { sp ->
                 TokenPill(sp.label, selectedSport == sp, { selectedSport = if (selectedSport == sp) null else sp })
+            }
+        }
+
+        // Sort Bar
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = tokens.spacing.screenPadding, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(GameSortMode.entries) { sm ->
+                TokenPill(
+                    label = sm.label,
+                    selected = sortMode == sm,
+                    onClick = { sortMode = sm },
+                    activeColor = c.sharpBadge,
+                    activeContainer = c.sharpBadgeDim,
+                )
             }
         }
 
@@ -196,18 +233,26 @@ fun GamesScreen(
                         CompactFixtureRow(
                             fixture = fx,
                             isPinned = isPinned,
-                            onTogglePin = { app.prefsRepo.togglePinTeam(fx.homeTeam) },
+                            onTogglePin = {
+                                if (fx.homeTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.homeTeam)
+                                else if (fx.awayTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.awayTeam)
+                                else app.prefsRepo.togglePinTeam(fx.homeTeam)
+                            },
                             onClick = { onOpenMatch(fx.id) },
                         )
                     } else {
                         FixtureCard(
                             fixture = fx,
-                            homePower = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]?.powerScore ?: 55,
-                            awayPower = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.awayTeam)]?.powerScore ?: 55,
+                            homePower = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]?.powerScore ?: 50,
+                            awayPower = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.awayTeam)]?.powerScore ?: 50,
                             homeForm = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]?.recentForm.orEmpty(),
                             awayForm = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.awayTeam)]?.recentForm.orEmpty(),
                             isPinned = isPinned,
-                            onTogglePin = { app.prefsRepo.togglePinTeam(fx.homeTeam) },
+                            onTogglePin = {
+                                if (fx.homeTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.homeTeam)
+                                else if (fx.awayTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.awayTeam)
+                                else app.prefsRepo.togglePinTeam(fx.homeTeam)
+                            },
                             onClick = { onOpenMatch(fx.id) },
                         )
                     }
@@ -305,14 +350,14 @@ private fun FixtureCard(
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TeamAvatar(fixture.homeTeam, size = 38.dp)
                 Column {
-                    Text(fixture.homeTeam, color = c.text, fontSize = scaledSp(14f), fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(fixture.homeTeam, color = c.text, fontSize = scaledSp(13.5f), fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text("Power $homePower/99", color = c.textMuted, fontSize = scaledSp(11f))
                 }
             }
             Text("VS", color = c.textMuted, fontSize = scaledSp(11f), fontWeight = FontWeight.ExtraBold)
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
                 Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 8.dp)) {
-                    Text(fixture.awayTeam, color = c.text, fontSize = scaledSp(14f), fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(fixture.awayTeam, color = c.text, fontSize = scaledSp(13.5f), fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text("Power $awayPower/99", color = c.textMuted, fontSize = scaledSp(11f))
                 }
                 TeamAvatar(fixture.awayTeam, size = 38.dp)
@@ -371,7 +416,7 @@ private fun FixtureCard(
                 StatusBadge(
                     text = "Good Value: ${fixture.bestValueLabel} (+${String.format("%.1f", fixture.bestValueEdgePct)}% edge)",
                     color = c.valueHighlight,
-                    containerColor = c.accentDim,
+                    containerColor = c.valueHighlightDim,
                 )
             }
         }

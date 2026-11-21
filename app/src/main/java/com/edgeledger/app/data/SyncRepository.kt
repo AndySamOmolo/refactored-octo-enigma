@@ -10,6 +10,7 @@ import com.edgeledger.app.model.HeadToHeadGame
 import com.edgeledger.app.model.HistoricalMatch
 import com.edgeledger.app.model.LeagueTrackRecord
 import com.edgeledger.app.model.MatchFixture
+import com.edgeledger.app.model.PredictionMarketQuote
 import com.edgeledger.app.model.ProviderHealth
 import com.edgeledger.app.model.Sport
 import com.edgeledger.app.model.StadiumWeather
@@ -42,6 +43,7 @@ data class AppModelSnapshot(
     val profiles: Map<String, TeamProfile>,
     val trackRecords: List<LeagueTrackRecord>,
     val providerHealth: List<ProviderHealth>,
+    val predictionMarkets: List<PredictionMarketQuote> = emptyList(),
 )
 
 class SyncRepository(
@@ -73,7 +75,11 @@ class SyncRepository(
     val providerQuotas: StateFlow<List<ProviderQuotaStatus>> = _providerQuotas.asStateFlow()
 
     companion object {
-        fun readableLeagueName(leagueId: String, sport: Sport): String = when (leagueId.uppercase()) {
+        fun readableLeagueName(leagueId: String, sport: Sport): String {
+            if (sport == Sport.F1) return "Formula 1"
+            if (sport == Sport.MMA) return "UFC / MMA"
+            if (sport == Sport.CRICKET) return "Cricket · ICC"
+            return when (leagueId.uppercase()) {
             "E0" -> "Premier League"
             "E1" -> "Championship"
             "SP1" -> "La Liga"
@@ -89,6 +95,7 @@ class SyncRepository(
             "F1R" -> "Formula 1"
             "UFC" -> "UFC / MMA"
             else -> leagueId.ifBlank { sport.label }
+            }
         }
     }
 
@@ -192,6 +199,7 @@ class SyncRepository(
 
             val liveHistory = mutableListOf<HistoricalMatch>()
             val liveUpcoming = mutableListOf<RawUpcomingEvent>()
+            val nhlStandingsProfiles = mutableMapOf<String, TeamProfile>()
             val clubElo = SeedData.CLUB_ELO_ANCHOR.toMutableMap()
             val health = mutableListOf<ProviderHealth>()
             var okCount = 0
@@ -208,7 +216,7 @@ class SyncRepository(
                 FeedSpec("fd-d1", "Football-Data.co.uk (Bundesliga)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/D1.csv") { raw ->
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "D1"); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "http://api.clubelo.com/$today", "https://api.clubelo.com/$today") { raw ->
+                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "http://api.clubelo.com/$today", "http://api.clubelo.com/${today.minusDays(1)}") { raw ->
                     val map = CsvAndFeedParsers.parseClubEloCsv(raw); clubElo.putAll(map); map.size
                 },
                 FeedSpec("espn-epl", "ESPN Premier League Fixtures", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard") { raw ->
@@ -228,6 +236,9 @@ class SyncRepository(
                 },
                 FeedSpec("nhl-api", "Official NHL Web API", Sport.NHL, "https://api-web.nhle.com/v1/schedule/now") { raw ->
                     val u = CsvAndFeedParsers.parseNhlSchedule(raw); liveUpcoming.addAll(u); u.size
+                },
+                FeedSpec("nhl-standings", "Official NHL Standings API", Sport.NHL, "https://api-web.nhle.com/v1/standings/now") { raw ->
+                    val map = CsvAndFeedParsers.parseNhlStandings(raw); nhlStandingsProfiles.putAll(map); map.size
                 },
                 FeedSpec("mlb-api", "Official MLB Stats API", Sport.MLB, "https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=$today") { raw ->
                     val u = CsvAndFeedParsers.parseMlbSchedule(raw); liveUpcoming.addAll(u); u.size
@@ -322,10 +333,18 @@ class SyncRepository(
                 )
             }
 
+            val livePredictionMarkets = mutableListOf<PredictionMarketQuote>()
+
             if (keys.enablePolymarket) {
-                _syncStatusText.value = "Checking Polymarket public odds..."
+                _syncStatusText.value = "Syncing Polymarket public odds..."
                 val pm = optionalClient.fetchPolymarketOdds()
-                if (pm.isNotEmpty()) okCount++
+                if (pm.isNotEmpty()) {
+                    okCount++
+                    pm.take(20).forEach { (q, prob) ->
+                        val yp = (prob * 100.0).roundToInt().coerceIn(1, 99)
+                        livePredictionMarkets.add(PredictionMarketQuote("Polymarket", q, yp, 100 - yp))
+                    }
+                }
                 health.add(
                     ProviderHealth(
                         "polymarket",
@@ -339,10 +358,34 @@ class SyncRepository(
                 )
             }
 
+            if (keys.enableKalshi) {
+                _syncStatusText.value = "Syncing Kalshi public markets..."
+                val ka = optionalClient.fetchKalshiOdds()
+                if (ka.isNotEmpty()) {
+                    okCount++
+                    ka.take(20).forEach { (q, prob) ->
+                        val yp = (prob * 100.0).roundToInt().coerceIn(1, 99)
+                        livePredictionMarkets.add(PredictionMarketQuote("Kalshi", q, yp, 100 - yp))
+                    }
+                }
+                health.add(
+                    ProviderHealth(
+                        "kalshi",
+                        "Kalshi Public Market Data",
+                        Sport.FOOTBALL,
+                        if (ka.isNotEmpty()) "LIVE" else "OFFLINE",
+                        ka.size,
+                        now.toString(),
+                        if (ka.isNotEmpty()) "${ka.size} open exchange markets synced" else "Offline fallback",
+                    )
+                )
+            }
+
             _providerQuotas.value = optionalClient.getQuotaSummary(keys)
 
             _syncStatusText.value = "Fitting models & weather..."
-            val mergedHistory = liveHistory + SeedData.buildSeedHistory(now)
+            val liveSports = liveHistory.map { it.sport }.toSet()
+            val mergedHistory = liveHistory + SeedData.buildSeedHistory(now).filter { it.sport !in liveSports }
             val baseUpcoming = if (liveUpcoming.isNotEmpty()) {
                 liveUpcoming + SeedData.buildSeedUpcoming(now).filter { s -> liveUpcoming.none { it.sport == s.sport } }
             } else {
@@ -368,6 +411,8 @@ class SyncRepository(
                 isSeed = okCount == 0,
                 fetchLiveWeather = okCount > 0,
                 now = now,
+                predictionMarkets = livePredictionMarkets,
+                extraProfiles = nhlStandingsProfiles,
             )
             _snapshot.value = snap
             persistSnapshot(snap)
@@ -401,9 +446,11 @@ class SyncRepository(
         isSeed: Boolean,
         fetchLiveWeather: Boolean,
         now: Instant,
+        predictionMarkets: List<PredictionMarketQuote> = emptyList(),
+        extraProfiles: Map<String, TeamProfile> = emptyMap(),
     ): AppModelSnapshot {
         val userPrefs = prefsRepo.prefs.value
-        val profiles = PredictionEngine.buildTeamProfiles(history, clubElo)
+        val profiles = PredictionEngine.buildTeamProfiles(history, clubElo) + extraProfiles
 
         val trackRecords = history.groupBy { it.sport to it.leagueId }
             .filter { it.value.size >= 12 }
@@ -473,8 +520,8 @@ class SyncRepository(
                 ).filter { it.isGoodValue }.maxByOrNull { it.expectedValue }
             }
 
-            val hPower = pH?.powerScore ?: 55
-            val aPower = pA?.powerScore ?: 55
+            val hPower = pH?.powerScore ?: 50
+            val aPower = pA?.powerScore ?: 50
             val hFormScore = (pH?.recentForm ?: emptyList()).takeLast(5).sumOf { if (it == "W") 1.0 else if (it == "D") 0.45 else 0.0 }
             val aFormScore = (pA?.recentForm ?: emptyList()).takeLast(5).sumOf { if (it == "W") 1.0 else if (it == "D") 0.45 else 0.0 }
             val hasWeatherImpact = (weather?.windKmh ?: 0) >= 24 || (weather?.rainChancePct ?: 0) >= 55
@@ -542,6 +589,7 @@ class SyncRepository(
             profiles = profiles,
             trackRecords = trackRecords,
             providerHealth = health,
+            predictionMarkets = predictionMarkets,
         )
     }
 }

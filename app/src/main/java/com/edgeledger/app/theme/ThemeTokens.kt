@@ -138,7 +138,7 @@ data class ThemeConfigV1(
     // Fixture list density (SH-05)
     val fixtureLayout: FixtureLayoutMode = FixtureLayoutMode.ANALYTICAL,
     // Power optimization (ED-08)
-    val batterySaverAutoAmoled: Boolean = true,
+    val batterySaverAutoAmoled: Boolean = false,
     // Motion & tactile feedback (MO-01, MO-04)
     val motionSpeed: MotionSpeed = MotionSpeed.NORMAL,
     val haptics: HapticLevel = HapticLevel.SUBTLE
@@ -228,7 +228,7 @@ object ThemePresets {
         fontFamily = FontFamilyPreset.SYSTEM,
         fontScale = 1.0f,
         fixtureLayout = FixtureLayoutMode.ANALYTICAL,
-        batterySaverAutoAmoled = true,
+        batterySaverAutoAmoled = false,
         motionSpeed = MotionSpeed.NORMAL,
         haptics = HapticLevel.SUBTLE
     )
@@ -257,7 +257,7 @@ object ThemePresets {
         fontFamily = FontFamilyPreset.SYSTEM,
         fontScale = 1.0f,
         fixtureLayout = FixtureLayoutMode.ANALYTICAL,
-        batterySaverAutoAmoled = true,
+        batterySaverAutoAmoled = false,
         motionSpeed = MotionSpeed.NORMAL,
         haptics = HapticLevel.SUBTLE
     )
@@ -286,7 +286,7 @@ object ThemePresets {
         fontFamily = FontFamilyPreset.SYSTEM,
         fontScale = 1.0f,
         fixtureLayout = FixtureLayoutMode.ANALYTICAL,
-        batterySaverAutoAmoled = true,
+        batterySaverAutoAmoled = false,
         motionSpeed = MotionSpeed.NORMAL,
         haptics = HapticLevel.SUBTLE
     )
@@ -315,7 +315,7 @@ object ThemePresets {
         fontFamily = FontFamilyPreset.MONO,
         fontScale = 0.95f,
         fixtureLayout = FixtureLayoutMode.COMPACT_ROW,
-        batterySaverAutoAmoled = true,
+        batterySaverAutoAmoled = false,
         motionSpeed = MotionSpeed.SNAPPY,
         haptics = HapticLevel.CRISP
     )
@@ -344,7 +344,7 @@ object ThemePresets {
         fontFamily = FontFamilyPreset.SYSTEM,
         fontScale = 1.0f,
         fixtureLayout = FixtureLayoutMode.ANALYTICAL,
-        batterySaverAutoAmoled = true,
+        batterySaverAutoAmoled = false,
         motionSpeed = MotionSpeed.NORMAL,
         haptics = HapticLevel.SUBTLE
     )
@@ -373,7 +373,7 @@ object ThemePresets {
         fontFamily = FontFamilyPreset.ROUNDED,
         fontScale = 1.0f,
         fixtureLayout = FixtureLayoutMode.ANALYTICAL,
-        batterySaverAutoAmoled = true,
+        batterySaverAutoAmoled = false,
         motionSpeed = MotionSpeed.NORMAL,
         haptics = HapticLevel.SUBTLE
     )
@@ -874,9 +874,9 @@ data class SemanticColors(
     val bg: Color get() = background
     val text: Color get() = textPrimary
     val surfaceRaised: Color get() = surfaceElevated
-    val onWin: Color get() = Color.White
-    val onDraw: Color get() = Color(0xFF0B0F17)
-    val onLoss: Color get() = Color.White
+    val onWin: Color get() = idealOnColor(win)
+    val onDraw: Color get() = idealOnColor(draw)
+    val onLoss: Color get() = idealOnColor(loss)
 }
 
 @Immutable
@@ -979,7 +979,7 @@ fun resolveTokens(
     val safe = config.sanitized()
 
     // Battery saver auto-AMOLED override (ED-08)
-    val effectiveMode = if (isBatterySaverActive && safe.batterySaverAutoAmoled) {
+    val effectiveMode = if (isBatterySaverActive && safe.batterySaverAutoAmoled && safe.mode != ThemeMode.LIGHT) {
         ThemeMode.AMOLED
     } else {
         safe.mode
