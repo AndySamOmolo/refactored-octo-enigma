@@ -421,10 +421,6 @@ class SyncRepository(
                 OddsMath.deVig(it.homeOdds, it.awayOdds, it.drawOdds, userPrefs.devigMethod)
             }
             val sharpFairHome = sharpDevig?.fairHome
-            val retailLine = ev.bookOdds.firstOrNull { !it.isSharp } ?: sharpLine
-            val retailFairHome = retailLine?.let {
-                OddsMath.deVig(it.homeOdds, it.awayOdds, it.drawOdds, userPrefs.devigMethod).fairHome
-            } ?: sharpFairHome ?: markets.probHome
 
             val markets = PredictionEngine.predictAllMarkets(
                 sport = ev.sport,
@@ -436,6 +432,11 @@ class SyncRepository(
                 sharpMarketHomeProb = sharpFairHome,
                 marketBlendWeight = userPrefs.marketBlendWeight,
             )
+
+            val retailLine = ev.bookOdds.firstOrNull { !it.isSharp } ?: sharpLine
+            val retailFairHome = retailLine?.let {
+                OddsMath.deVig(it.homeOdds, it.awayOdds, it.drawOdds, userPrefs.devigMethod).fairHome
+            } ?: sharpFairHome ?: markets.probHome
 
             val h2h = history.filter {
                 it.sport == ev.sport &&

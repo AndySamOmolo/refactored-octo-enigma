@@ -96,6 +96,16 @@ data class SignificanceResult(
  */
 object OddsMath {
 
+    fun expectedValue(modelProb: Double, decimalOdds: Double): Double =
+        (modelProb * decimalOdds) - 1.0
+
+    fun americanToDecimal(american: Double): Double = when {
+        american > 0.0 -> 1.0 + (american / 100.0)
+        american < 0.0 -> 1.0 + (100.0 / (-american))
+        else -> 2.0
+    }
+
+
     private const val EPSILON = 1e-12
     private const val MIN_PROB_FLOOR = 1e-6
     private const val SOLVER_ITERATIONS = 64

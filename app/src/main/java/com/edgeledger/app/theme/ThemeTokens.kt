@@ -1,5 +1,6 @@
 package com.edgeledger.app.theme
 
+import androidx.compose.foundation.shape.CornerBasedShape
 import androidx.compose.foundation.shape.CutCornerShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
@@ -873,6 +874,9 @@ data class SemanticColors(
     val bg: Color get() = background
     val text: Color get() = textPrimary
     val surfaceRaised: Color get() = surfaceElevated
+    val onWin: Color get() = Color.White
+    val onDraw: Color get() = Color(0xFF0B0F17)
+    val onLoss: Color get() = Color.White
 }
 
 @Immutable
@@ -882,13 +886,18 @@ data class ShapeTokens(
     val cornerLg: Dp,
     val cardCorner: Dp,
     val pillCorner: Dp,
-    val small: Shape,
-    val medium: Shape,
-    val large: Shape,
-    val card: Shape,
-    val pill: Shape,
+    val small: CornerBasedShape,
+    val medium: CornerBasedShape,
+    val large: CornerBasedShape,
+    val card: CornerBasedShape,
+    val pill: CornerBasedShape,
     val materialShapes: Shapes
-)
+) {
+    val extraSmall: CornerBasedShape get() = small
+    val button: CornerBasedShape get() = medium
+    val chip: CornerBasedShape get() = pill
+    val badge: CornerBasedShape get() = small
+}
 
 @Immutable
 data class SpacingTokens(
@@ -903,7 +912,11 @@ data class SpacingTokens(
     val itemGap: Dp,
     val borderWidth: Dp,
     val cardElevation: Dp
-)
+) {
+    val screenPadding: Dp get() = md
+    val chipHorizontalPadding: Dp get() = md
+    val chipVerticalPadding: Dp get() = xs + 2.dp
+}
 
 @Immutable
 data class MotionTokens(
@@ -953,6 +966,9 @@ data class ResolvedThemeTokens(
     val cornerMd: Dp get() = shapes.cornerMd
     val cornerLg: Dp get() = shapes.cornerLg
     val fontScale: Float get() = config.fontScale
+    val materialShapes: Shapes get() = shapes.materialShapes
+    val elevationDp: Dp get() = spacing.cardElevation
+    val borderWidthDp: Dp get() = spacing.borderWidth
 }
 
 fun resolveTokens(
@@ -1199,7 +1215,7 @@ fun resolveTokens(
     val cardCorner = safe.cardCornerOverrideDp?.dp ?: baseMd
     val pillCorner = if (safe.shapeFamily == ShapeFamily.SHARP) 4.dp else 999.dp
 
-    fun shapeFor(radius: Dp): Shape = when (safe.shapeFamily) {
+    fun shapeFor(radius: Dp): CornerBasedShape = when (safe.shapeFamily) {
         ShapeFamily.CUT -> CutCornerShape(radius)
         ShapeFamily.SHARP,
         ShapeFamily.ROUNDED,
@@ -1362,22 +1378,3 @@ fun resolveTokens(
 }
 
 
-// v6.0 UI convenience extensions
-val ResolvedThemeTokens.elevationDp: Dp
-    get() = when (surfaceStyle) {
-        SurfaceStyle.ELEVATED -> if (isDark) 4.dp else 6.dp
-        SurfaceStyle.TONAL -> 1.dp
-        SurfaceStyle.OUTLINED, SurfaceStyle.FLAT -> 0.dp
-    }
-
-val ResolvedThemeTokens.borderWidthDp: Dp
-    get() = when (surfaceStyle) {
-        SurfaceStyle.OUTLINED -> 1.dp
-        SurfaceStyle.TONAL -> if (effectiveMode == ThemeMode.AMOLED) 1.dp else 0.5.dp
-        SurfaceStyle.ELEVATED -> if (effectiveMode == ThemeMode.AMOLED) 0.75.dp else 0.dp
-        SurfaceStyle.FLAT -> 0.dp
-    }
-
-val SemanticColors.onWin: Color get() = Color.White
-val SemanticColors.onDraw: Color get() = Color(0xFF0B0F17)
-val SemanticColors.onLoss: Color get() = Color.White
