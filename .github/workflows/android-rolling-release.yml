@@ -1,0 +1,111 @@
+name: Android Rolling Release (Overwrite Latest)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Optional weekly automated rebuild every Monday at 04:00 UTC
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-rolling-release
+  cancel-in-progress: true
+
+jobs:
+  build-and-overwrite-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Run TypeScript check, engine tests & workflow lint
+        run: npm run verify
+
+      - name: Generate Android native project (Expo Prebuild)
+        run: npx expo prebuild --platform android --clean --non-interactive
+
+      - name: Configure optional release keystore (if secrets are provided)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+            echo "HAS_KEYSTORE=true" >> $GITHUB_ENV
+          else
+            echo "HAS_KEYSTORE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Build Android Release APK
+        working-directory: android
+        env:
+          ORG_GRADLE_PROJECT_RELEASE_STORE_FILE: release.keystore
+          ORG_GRADLE_PROJECT_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ORG_GRADLE_PROJECT_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ORG_GRADLE_PROJECT_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Stage deterministic rolling APK filename
+        run: |
+          mkdir -p dist
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "No APK found in android/app/build/outputs/apk/release"
+            exit 1
+          fi
+          cp "$APK_PATH" dist/edgeledger-android-latest.apk
+          sha256sum dist/edgeledger-android-latest.apk > dist/edgeledger-android-latest.apk.sha256
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          cat <<EOF > dist/release-notes.md
+          ### EdgeLedger Android — Rolling Latest Build
+          - **Built:** ${BUILD_DATE}
+          - **Commit:** \`${GITHUB_SHA::8}\`
+          - **Offline Engine:** On-device Dixon-Coles + Multi-Sport Elo + Surface Tennis Elo + Quarter-Kelly
+          - **Data Sync:** Pulls free keyless public sports feeds directly on-device once every 7 days (or manually via **SYNC NOW**).
+          - **Note:** This rolling \`latest\` release automatically overwrites the previous APK on every build.
+          EOF
+
+      - name: Force-move rolling 'latest' tag to current commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f latest
+          git push -f origin refs/tags/latest
+
+      - name: Overwrite existing 'latest' GitHub Release and APK asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "EdgeLedger Android (Rolling Latest)"
+          make_latest: "true"
+          body_path: dist/release-notes.md
+          files: |
+            dist/edgeledger-android-latest.apk
+            dist/edgeledger-android-latest.apk.sha256
