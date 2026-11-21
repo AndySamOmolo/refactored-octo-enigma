@@ -469,7 +469,7 @@ object PredictionEngine {
             baseWinH * (1.0 - w) + sharpMarketHomeProb * w
         } else baseWinH
 
-        val (defScoreH, defScoreA, marginSd, totalSd, altSp, closeLabel, closeBand, otBase, unit) = when (sport) {
+        val cfg: Array<Any> = when (sport) {
             Sport.NFL -> arrayOf(23.5, 21.0, 13.5, 13.0, 3.5, "One-Score Game (<=7 pts)", 7.0, 0.08, "Points")
             Sport.NBA -> arrayOf(115.0, 111.5, 12.2, 17.0, 5.5, "Close Finish (<=6 pts)", 6.0, 0.06, "Points")
             Sport.NHL -> arrayOf(3.2, 2.8, 2.15, 2.2, 1.5, "1-Goal Game", 1.5, 0.23, "Goals")
@@ -477,6 +477,16 @@ object PredictionEngine {
             Sport.CRICKET -> arrayOf(172.0, 165.0, 22.0, 28.0, 15.5, "Close Finish (<=15 runs)", 15.0, 0.04, "Runs")
             else -> arrayOf(1.0, 0.0, 1.0, 1.0, 0.5, "Close Matchup", 0.5, 0.05, "Pts")
         }
+        val defScoreH = cfg[0] as Double
+        val defScoreA = cfg[1] as Double
+        val marginSd = cfg[2] as Double
+        val totalSd = cfg[3] as Double
+        val altSp = cfg[4] as Double
+        val closeLabel = cfg[5] as String
+        val closeBand = cfg[6] as Double
+        val otBase = cfg[7] as Double
+        val unit = cfg[8] as String
+
 
         val pH = ((homeProfile?.avgScored ?: (defScoreH as Double)) + (awayProfile?.avgConceded ?: (defScoreA as Double))) / 2.0
         val pA = ((awayProfile?.avgScored ?: (defScoreA as Double)) + (homeProfile?.avgConceded ?: (defScoreH as Double))) / 2.0
