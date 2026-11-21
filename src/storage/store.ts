@@ -3,8 +3,8 @@ import { PaperBet, SyncedModelState, UserSettings } from '../types';
 import { buildInitialSeedState, DEFAULT_USER_SETTINGS } from '../engine/syncPipeline';
 
 const KEYS = {
-  MODEL_STATE: '@edgeledger/model_state_v1',
-  SETTINGS: '@edgeledger/settings_v1',
+  MODEL_STATE: '@edgeledger/model_state_v3',
+  SETTINGS: '@edgeledger/settings_v2',
   PAPER_BETS: '@edgeledger/paper_bets_v1',
 };
 
@@ -31,7 +31,7 @@ export async function loadModelState(settings: UserSettings): Promise<SyncedMode
       return seed;
     }
     const parsed = JSON.parse(raw) as SyncedModelState;
-    if (!parsed || parsed.schemaVersion !== 1 || !Array.isArray(parsed.fixtures)) {
+    if (!parsed || parsed.schemaVersion !== 3 || !Array.isArray(parsed.fixtures) || !parsed.teamProfiles) {
       const seed = buildInitialSeedState(settings);
       await AsyncStorage.setItem(KEYS.MODEL_STATE, JSON.stringify(seed));
       return seed;

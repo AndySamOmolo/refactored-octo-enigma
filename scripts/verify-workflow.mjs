@@ -10,6 +10,7 @@ const requiredSnippets = [
   'permissions:',
   'contents: write',
   'schedule:',
+  'sdkmanager" --licenses',
   'npx expo prebuild --platform android --clean',
   './gradlew assembleRelease',
   'git tag -f latest',
@@ -20,7 +21,10 @@ const requiredSnippets = [
 ];
 
 for (const snippet of requiredSnippets) {
-  assert.ok(wf.includes(snippet), `Workflow missing required rolling-release directive: ${snippet}`);
+  assert.ok(wf.includes(snippet), `Workflow missing required directive: ${snippet}`);
 }
 
-console.log('GITHUB ACTIONS ROLLING RELEASE WORKFLOW VERIFIED');
+assert.ok(!wf.includes("cache: 'npm'"), 'Workflow must not set cache: npm without package-lock.json');
+assert.ok(!wf.includes('android-actions/setup-android'), 'Workflow must not use broken setup-android@v3');
+
+console.log('GITHUB ACTIONS ROLLING RELEASE WORKFLOW VERIFIED (WITH BOTH CI FIXES)');

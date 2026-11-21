@@ -39,5 +39,3 @@ npm run verify
 ```
 
 > **Disclaimer:** EdgeLedger is an analytical probability and paper-trading tool. It does not place real-money wagers or guarantee profits.
-# refactored-octo-enigma
-# refactored-octo-enigma

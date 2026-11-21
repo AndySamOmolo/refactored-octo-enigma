@@ -10,15 +10,20 @@ import {
 import { useAppState } from '../../src/context/AppStateContext';
 import { SPORT_META } from '../../src/data/sources';
 import { predictDixonColesMatch } from '../../src/engine/dixonColes';
-import { blendFootballPredictions, predictEloMatch, ratingKey } from '../../src/engine/eloEngine';
+import { blendFootballPredictions, predictEloMatch } from '../../src/engine/eloEngine';
 import { evaluateMatchSignals } from '../../src/engine/kelly';
-import { COLORS, FONTS, RADIUS, SPACING } from '../../src/theme';
+import { profileKey } from '../../src/engine/teamStats';
+import { predictAllMarkets } from '../../src/engine/marketPredictor';
+import { TeamAvatar } from '../../src/components/TeamAvatar';
+import { ProbBar } from '../../src/components/ProbBar';
+import { StatCompareBar } from '../../src/components/StatCompareBar';
+import { COLORS, RADIUS, SPACING } from '../../src/theme';
 import { SportId, TennisSurface } from '../../src/types';
 
 const SPORTS: SportId[] = ['football', 'nfl', 'nba', 'nhl', 'mlb', 'tennis'];
 const SURFACES: TennisSurface[] = ['Hard', 'Clay', 'Grass'];
 
-export default function SimulatorScreen() {
+export default function CompareScreen() {
   const { modelState, settings } = useAppState();
   const [sport, setSport] = useState<SportId>('football');
   const [surface, setSurface] = useState<TennisSurface>('Hard');
@@ -34,8 +39,14 @@ export default function SimulatorScreen() {
       .sort((a, b) => b.elo - a.elo);
   }, [modelState.ratings, sport]);
 
-  const homeTeam = teamsForSport[homeIdx % Math.max(1, teamsForSport.length)];
-  const awayTeam = teamsForSport[awayIdx % Math.max(1, teamsForSport.length)];
+  const count = Math.max(1, teamsForSport.length);
+  const safeHomeIdx = homeIdx % count;
+  const safeAwayIdx = awayIdx % count === safeHomeIdx && count > 1 ? (safeHomeIdx + 1) % count : awayIdx % count;
+
+  const homeTeam = teamsForSport[safeHomeIdx];
+  const awayTeam = teamsForSport[safeAwayIdx];
+  const pH = homeTeam ? modelState.teamProfiles?.[profileKey(sport, homeTeam.team)] : undefined;
+  const pA = awayTeam ? modelState.teamProfiles?.[profileKey(sport, awayTeam.team)] : undefined;
 
   const prediction = useMemo(() => {
     if (!homeTeam || !awayTeam) return null;
@@ -50,11 +61,105 @@ export default function SimulatorScreen() {
     return eloPred;
   }, [homeTeam, awayTeam, sport, surface, modelState.dixonColes]);
 
+  const fullMarkets = useMemo(() => {
+    if (!homeTeam || !awayTeam) return null;
+    if (sport === 'football') {
+      return predictAllMarkets({
+        sport: 'football',
+        home: {
+          name: homeTeam.team,
+          strengthRating: homeTeam.elo,
+          goalsForAvg: pH?.avgScored ?? 1.4,
+          goalsAgainstAvg: pH?.avgConceded ?? 1.2,
+          splitGoalsForAvg: pH?.homeAvgScored,
+          splitGoalsAgainstAvg: pH?.homeAvgConceded,
+          shotsOnTargetForAvg: pH?.football?.shotsOnTargetPerGame,
+          shotsOnTargetAgainstAvg: pH?.football?.shotsOnTargetConcededPerGame,
+          totalShotsForAvg: pH?.football?.shotsPerGame,
+          totalShotsAgainstAvg: pH?.football?.shotsConcededPerGame,
+          firstHalfGoalsForAvg: pH?.football?.avgFirstHalfGoalsScored,
+          cornersForAvg: pH?.football?.cornersPerGame,
+          cornersAgainstAvg: pH?.football?.cornersConcededPerGame,
+          foulsForAvg: pH?.football?.foulsPerGame,
+          yellowCardsAvg: pH?.football?.yellowCardsPerGame,
+          redCardsAvg: pH?.football?.redCardsPerGame,
+          recentForm: pH?.recentMatches,
+        },
+        away: {
+          name: awayTeam.team,
+          strengthRating: awayTeam.elo,
+          goalsForAvg: pA?.avgScored ?? 1.3,
+          goalsAgainstAvg: pA?.avgConceded ?? 1.3,
+          splitGoalsForAvg: pA?.awayAvgScored,
+          splitGoalsAgainstAvg: pA?.awayAvgConceded,
+          shotsOnTargetForAvg: pA?.football?.shotsOnTargetPerGame,
+          shotsOnTargetAgainstAvg: pA?.football?.shotsOnTargetConcededPerGame,
+          totalShotsForAvg: pA?.football?.shotsPerGame,
+          totalShotsAgainstAvg: pA?.football?.shotsConcededPerGame,
+          firstHalfGoalsForAvg: pA?.football?.avgFirstHalfGoalsScored,
+          cornersForAvg: pA?.football?.cornersPerGame,
+          cornersAgainstAvg: pA?.football?.cornersConcededPerGame,
+          foulsForAvg: pA?.football?.foulsPerGame,
+          yellowCardsAvg: pA?.football?.yellowCardsPerGame,
+          redCardsAvg: pA?.football?.redCardsPerGame,
+          recentForm: pA?.recentMatches,
+        },
+      });
+    }
+    if (sport === 'tennis') {
+      return predictAllMarkets({
+        sport: 'atp_tennis',
+        surface,
+        playerA: {
+          name: homeTeam.team,
+          overallRating: homeTeam.elo,
+          surfaceRatings: homeTeam.surfaceElo,
+          firstServeWonPct: (pH?.tennis?.firstServeWinPct ?? 73) / 100,
+          acesPerMatchAvg: pH?.tennis?.avgAcesPerMatch,
+          doubleFaultsAvg: pH?.tennis?.avgDoubleFaultsPerMatch,
+          recentForm: pH?.recentMatches,
+        },
+        playerB: {
+          name: awayTeam.team,
+          overallRating: awayTeam.elo,
+          surfaceRatings: awayTeam.surfaceElo,
+          firstServeWonPct: (pA?.tennis?.firstServeWinPct ?? 73) / 100,
+          acesPerMatchAvg: pA?.tennis?.avgAcesPerMatch,
+          doubleFaultsAvg: pA?.tennis?.avgDoubleFaultsPerMatch,
+          recentForm: pA?.recentMatches,
+        },
+      });
+    }
+    return predictAllMarkets({
+      sport,
+      home: {
+        name: homeTeam.team,
+        strengthRating: homeTeam.elo,
+        offenseAvg: pH?.avgScored ?? (sport === 'nba' ? 113 : sport === 'nfl' ? 23 : 3.2),
+        defenseAvg: pH?.avgConceded ?? (sport === 'nba' ? 112 : sport === 'nfl' ? 21 : 3.0),
+        splitOffenseAvg: pH?.homeAvgScored,
+        splitDefenseAvg: pH?.homeAvgConceded,
+        recentForm: pH?.recentMatches,
+        restDays: pH?.nfl?.avgRestDays,
+      },
+      away: {
+        name: awayTeam.team,
+        strengthRating: awayTeam.elo,
+        offenseAvg: pA?.avgScored ?? (sport === 'nba' ? 112 : sport === 'nfl' ? 22 : 3.0),
+        defenseAvg: pA?.avgConceded ?? (sport === 'nba' ? 113 : sport === 'nfl' ? 22 : 3.1),
+        splitOffenseAvg: pA?.awayAvgScored,
+        splitDefenseAvg: pA?.awayAvgConceded,
+        recentForm: pA?.recentMatches,
+        restDays: pA?.nfl?.avgRestDays,
+      },
+    });
+  }, [homeTeam, awayTeam, sport, surface, pH, pA]);
+
   const signals = useMemo(() => {
     if (!prediction || !homeTeam || !awayTeam) return [];
-    const h = Number.parseFloat(oddsHome) || 2.0;
-    const d = SPORT_META[sport].hasDraw ? Number.parseFloat(oddsDraw) || 3.4 : undefined;
-    const a = Number.parseFloat(oddsAway) || 2.0;
+    const h = Math.max(1.02, Number.parseFloat(oddsHome) || 2.0);
+    const d = SPORT_META[sport].hasDraw ? Math.max(1.02, Number.parseFloat(oddsDraw) || 3.4) : undefined;
+    const a = Math.max(1.02, Number.parseFloat(oddsAway) || 2.0);
     return evaluateMatchSignals(
       prediction,
       homeTeam.team,
@@ -70,9 +175,9 @@ export default function SimulatorScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.heading}>Offline Matchup &amp; Odds Simulator</Text>
+      <Text style={styles.heading}>Compare Any Two Teams Offline</Text>
       <Text style={styles.sub}>
-        Pair any two teams or players from your locally trained database to compute calibrated probabilities and Quarter-Kelly stakes with zero internet access.
+        Tap either team card below to cycle through teams in your saved database and predict every market—even without internet.
       </Text>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
@@ -87,7 +192,7 @@ export default function SimulatorScreen() {
             }}
           >
             <Text style={[styles.chipText, sport === s && styles.chipTextActive]}>
-              {SPORT_META[s].label.toUpperCase()}
+              {SPORT_META[s].label}
             </Text>
           </Pressable>
         ))}
@@ -101,125 +206,145 @@ export default function SimulatorScreen() {
               style={[styles.chip, surface === sf && styles.chipActive]}
               onPress={() => setSurface(sf)}
             >
-              <Text style={[styles.chipText, surface === sf && styles.chipTextActive]}>
-                {sf.toUpperCase()}
-              </Text>
+              <Text style={[styles.chipText, surface === sf && styles.chipTextActive]}>{sf} Court</Text>
             </Pressable>
           ))}
         </View>
       )}
 
       {/* Team Selectors */}
-      <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>SELECT MATCHUP (TAP TO CYCLE)</Text>
-        <View style={styles.pickerRow}>
-          <Pressable
-            style={styles.teamBtn}
-            onPress={() => setHomeIdx((i) => (i + 1) % Math.max(1, teamsForSport.length))}
-          >
-            <Text style={styles.pickerLabel}>HOME / PLAYER A</Text>
-            <Text style={styles.teamName}>{homeTeam?.team ?? '—'}</Text>
-            <Text style={styles.eloText}>Elo {homeTeam?.elo ?? 1500}</Text>
-          </Pressable>
-          <Pressable
-            style={styles.teamBtn}
-            onPress={() => setAwayIdx((i) => (i + 1) % Math.max(1, teamsForSport.length))}
-          >
-            <Text style={styles.pickerLabel}>AWAY / PLAYER B</Text>
-            <Text style={styles.teamName}>{awayTeam?.team ?? '—'}</Text>
-            <Text style={styles.eloText}>Elo {awayTeam?.elo ?? 1500}</Text>
-          </Pressable>
-        </View>
+      <View style={styles.pickerRow}>
+        <Pressable
+          style={styles.teamBtn}
+          onPress={() => setHomeIdx((i) => (i + 1) % count)}
+        >
+          <TeamAvatar teamName={homeTeam?.team ?? 'Home'} size={44} />
+          <Text style={styles.pickerLabel}>HOME · TAP TO CHANGE</Text>
+          <Text numberOfLines={1} style={styles.teamName}>{homeTeam?.team ?? '—'}</Text>
+          <Text style={styles.powerText}>Power {pH?.powerScore ?? 55}/99</Text>
+        </Pressable>
+
+        <Pressable
+          style={styles.teamBtn}
+          onPress={() => setAwayIdx((i) => (i + 1) % count)}
+        >
+          <TeamAvatar teamName={awayTeam?.team ?? 'Away'} size={44} />
+          <Text style={styles.pickerLabel}>AWAY · TAP TO CHANGE</Text>
+          <Text numberOfLines={1} style={styles.teamName}>{awayTeam?.team ?? '—'}</Text>
+          <Text style={styles.powerText}>Power {pA?.powerScore ?? 55}/99</Text>
+        </Pressable>
       </View>
 
-      {/* Predicted Probabilities */}
-      {prediction && (
+      {/* Win Chance Visual Bar */}
+      {prediction && homeTeam && awayTeam && (
         <View style={styles.panel}>
-          <Text style={styles.sectionTitle}>MODEL PROBABILITY OUTPUT</Text>
-          <View style={styles.probRow}>
-            <View style={styles.probBox}>
-              <Text style={styles.pickerLabel}>HOME</Text>
-              <Text style={styles.probBig}>{(prediction.probHome * 100).toFixed(1)}%</Text>
-            </View>
-            {SPORT_META[sport].hasDraw && (
-              <View style={styles.probBox}>
-                <Text style={styles.pickerLabel}>DRAW</Text>
-                <Text style={styles.probBig}>{(prediction.probDraw * 100).toFixed(1)}%</Text>
-              </View>
-            )}
-            <View style={styles.probBox}>
-              <Text style={styles.pickerLabel}>AWAY</Text>
-              <Text style={styles.probBig}>{(prediction.probAway * 100).toFixed(1)}%</Text>
-            </View>
-          </View>
-          {prediction.expectedHomeGoals !== undefined && (
+          <Text style={styles.sectionTitle}>Predicted Win Chances</Text>
+          <ProbBar
+            homeLabel={homeTeam.team}
+            drawLabel="Draw"
+            awayLabel={awayTeam.team}
+            homeProb={prediction.probHome}
+            drawProb={SPORT_META[sport].hasDraw ? prediction.probDraw : undefined}
+            awayProb={prediction.probAway}
+            barHeight={12}
+          />
+          {fullMarkets?.football && (
             <Text style={styles.metaLine}>
-              Expected Goals: {prediction.expectedHomeGoals.toFixed(2)} –{' '}
-              {prediction.expectedAwayGoals?.toFixed(2)} · Over 2.5:{' '}
-              {((prediction.probOver25 ?? 0) * 100).toFixed(1)}% · BTTS:{' '}
-              {((prediction.probBtts ?? 0) * 100).toFixed(1)}%
+              Projected: {fullMarkets.football.projectedGoals.home.toFixed(1)} –{' '}
+              {fullMarkets.football.projectedGoals.away.toFixed(1)} Goals · Corners:{' '}
+              {fullMarkets.football.teamProps.corners.projectedTotal.toFixed(1)} · Cards:{' '}
+              {fullMarkets.football.teamProps.cards.projectedTotal.toFixed(1)}
+            </Text>
+          )}
+          {fullMarkets?.teamSport && (
+            <Text style={styles.metaLine}>
+              Projected Score: {fullMarkets.teamSport.projectedScore.display} · Spread:{' '}
+              {fullMarkets.teamSport.projectedSpread.display} · Total:{' '}
+              {fullMarkets.teamSport.projectedTotal}
+            </Text>
+          )}
+          {fullMarkets?.tennis && (
+            <Text style={styles.metaLine}>
+              Projected Games: {fullMarkets.tennis.totalGames.projectedTotal} · Tiebreak:{' '}
+              {Math.round(fullMarkets.tennis.tiebreakChance * 100)}% · Aces:{' '}
+              {fullMarkets.tennis.projectedAces.total}
             </Text>
           )}
         </View>
       )}
 
-      {/* Custom Odds & Kelly Sizer */}
+      {/* Full Multi-Market Top Picks Offline */}
+      {fullMarkets && fullMarkets.topPicks.length > 0 && (
+        <View style={styles.panel}>
+          <Text style={styles.sectionTitle}>Top Picks for This Matchup</Text>
+          {fullMarkets.topPicks.map((pk) => (
+            <View key={pk.id} style={styles.sigRow}>
+              <View style={{ flex: 1, paddingRight: 8 }}>
+                <Text style={styles.sigTitle}>{pk.label}</Text>
+                <Text style={styles.sigSub}>{pk.plainReason}</Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={[styles.evText, { color: pk.confidence === 'Strong' ? COLORS.emerald : COLORS.accent }]}>
+                  {pk.chancePct}%
+                </Text>
+                <Text style={styles.sigSub}>{pk.confidence}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* Side-by-Side Stats */}
+      {pH && pA && (
+        <View style={styles.panel}>
+          <Text style={styles.sectionTitle}>Side-by-Side Stats</Text>
+          <StatCompareBar label="Win Rate" homeValue={pH.winPct} awayValue={pA.winPct} unit="%" decimals={0} />
+          <StatCompareBar label="Scored per Game" homeValue={pH.avgScored} awayValue={pA.avgScored} decimals={1} />
+          <StatCompareBar label="Allowed per Game" homeValue={pH.avgConceded} awayValue={pA.avgConceded} decimals={1} higherIsBetter={false} />
+        </View>
+      )}
+
+      {/* Plain-English Odds Checker */}
       <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>CUSTOM DECIMAL ODDS &amp; EV CHECK</Text>
+        <Text style={styles.sectionTitle}>Check Bookie Odds &amp; Suggested Bet</Text>
         <View style={styles.inputRow}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.pickerLabel}>HOME</Text>
-            <TextInput
-              style={styles.input}
-              keyboardType="decimal-pad"
-              value={oddsHome}
-              onChangeText={setOddsHome}
-            />
+            <Text style={styles.pickerLabel}>Home Odds</Text>
+            <TextInput style={styles.input} keyboardType="decimal-pad" value={oddsHome} onChangeText={setOddsHome} />
           </View>
           {SPORT_META[sport].hasDraw && (
             <View style={{ flex: 1 }}>
-              <Text style={styles.pickerLabel}>DRAW</Text>
-              <TextInput
-                style={styles.input}
-                keyboardType="decimal-pad"
-                value={oddsDraw}
-                onChangeText={setOddsDraw}
-              />
+              <Text style={styles.pickerLabel}>Draw Odds</Text>
+              <TextInput style={styles.input} keyboardType="decimal-pad" value={oddsDraw} onChangeText={setOddsDraw} />
             </View>
           )}
           <View style={{ flex: 1 }}>
-            <Text style={styles.pickerLabel}>AWAY</Text>
-            <TextInput
-              style={styles.input}
-              keyboardType="decimal-pad"
-              value={oddsAway}
-              onChangeText={setOddsAway}
-            />
+            <Text style={styles.pickerLabel}>Away Odds</Text>
+            <TextInput style={styles.input} keyboardType="decimal-pad" value={oddsAway} onChangeText={setOddsAway} />
           </View>
         </View>
 
-        {signals.map((s) => (
-          <View key={s.side} style={[styles.sigRow, s.isValue && styles.sigRowPos]}>
-            <View>
-              <Text style={styles.sigTitle}>
-                {s.label} @{s.decimalOdds.toFixed(2)}
-              </Text>
-              <Text style={styles.sigSub}>
-                Model {(s.modelProb * 100).toFixed(1)}% · Fair {(s.fairMarketProb * 100).toFixed(1)}%
-              </Text>
+        {signals.map((s) => {
+          const stakeAmt = Math.round(settings.bankroll * s.kellyFraction);
+          return (
+            <View key={s.side} style={[styles.sigRow, s.isValue && styles.sigRowPos]}>
+              <View>
+                <Text style={styles.sigTitle}>{s.label} @ {s.decimalOdds.toFixed(2)}</Text>
+                <Text style={styles.sigSub}>
+                  Our Chance: {Math.round(s.modelProb * 100)}% · Bookie Fair: {Math.round(s.fairMarketProb * 100)}%
+                </Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={[styles.evText, { color: s.isValue ? COLORS.emerald : COLORS.textMuted }]}>
+                  {s.isValue ? 'Good Value' : 'Skip'}
+                </Text>
+                <Text style={styles.sigSub}>
+                  {stakeAmt > 0 ? `Suggested: $${stakeAmt}` : 'No edge'}
+                </Text>
+              </View>
             </View>
-            <View style={{ alignItems: 'flex-end' }}>
-              <Text style={[styles.evText, { color: s.isValue ? COLORS.emerald : COLORS.textMuted }]}>
-                {s.expectedValue >= 0 ? '+' : ''}
-                {(s.expectedValue * 100).toFixed(1)}% EV
-              </Text>
-              <Text style={styles.sigSub}>
-                Q-Kelly {(s.kellyFraction * 100).toFixed(2)}% ($
-                {(settings.bankroll * s.kellyFraction).toFixed(0)})
-              </Text>
-            </View>
-          </View>
-        ))}
+          );
+        })}
       </View>
     </ScrollView>
   );
@@ -228,53 +353,45 @@ export default function SimulatorScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   content: { padding: SPACING.md, gap: 14, paddingBottom: 36 },
-  heading: { fontSize: 20, fontWeight: '700', color: COLORS.text },
+  heading: { fontSize: 20, fontWeight: '800', color: COLORS.text },
   sub: { fontSize: 13, color: COLORS.textMuted, lineHeight: 19 },
   chipRow: { gap: 8 },
   surfaceRow: { flexDirection: 'row', gap: 8 },
   chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 13,
+    paddingVertical: 7,
     borderRadius: RADIUS.pill,
     borderWidth: 1,
     borderColor: COLORS.border,
     backgroundColor: COLORS.surface,
   },
   chipActive: { borderColor: COLORS.accent, backgroundColor: COLORS.accentDim },
-  chipText: { fontFamily: FONTS.mono, fontSize: 11, fontWeight: '600', color: COLORS.textSecondary },
+  chipText: { fontSize: 12, fontWeight: '700', color: COLORS.textSecondary },
   chipTextActive: { color: COLORS.accent },
-  panel: {
-    backgroundColor: COLORS.surface,
-    borderRadius: RADIUS.md,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: SPACING.md,
-    gap: 10,
-  },
-  sectionTitle: { fontFamily: FONTS.mono, fontSize: 11, fontWeight: '700', color: COLORS.textSecondary },
   pickerRow: { flexDirection: 'row', gap: 10 },
   teamBtn: {
     flex: 1,
-    backgroundColor: COLORS.surfaceRaised,
-    borderRadius: RADIUS.sm,
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
     borderWidth: 1,
     borderColor: COLORS.border,
-    padding: 12,
-    gap: 4,
-  },
-  pickerLabel: { fontFamily: FONTS.mono, fontSize: 10, color: COLORS.textMuted },
-  teamName: { fontSize: 14, fontWeight: '700', color: COLORS.text },
-  eloText: { fontFamily: FONTS.mono, fontSize: 12, color: COLORS.accent },
-  probRow: { flexDirection: 'row', gap: 8 },
-  probBox: {
-    flex: 1,
-    backgroundColor: COLORS.surfaceRaised,
-    borderRadius: RADIUS.sm,
-    padding: 12,
+    padding: 14,
     alignItems: 'center',
+    gap: 5,
   },
-  probBig: { fontFamily: FONTS.mono, fontSize: 20, fontWeight: '700', color: COLORS.text, marginTop: 4 },
-  metaLine: { fontFamily: FONTS.mono, fontSize: 11, color: COLORS.textSecondary },
+  pickerLabel: { fontSize: 10, fontWeight: '700', color: COLORS.textMuted },
+  teamName: { fontSize: 14, fontWeight: '800', color: COLORS.text, textAlign: 'center' },
+  powerText: { fontSize: 12, fontWeight: '700', color: COLORS.accent },
+  panel: {
+    backgroundColor: COLORS.surface,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 16,
+    gap: 12,
+  },
+  sectionTitle: { fontSize: 15, fontWeight: '800', color: COLORS.text },
+  metaLine: { fontSize: 12.5, color: COLORS.textSecondary, lineHeight: 18 },
   inputRow: { flexDirection: 'row', gap: 8 },
   input: {
     marginTop: 4,
@@ -283,8 +400,8 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     borderRadius: RADIUS.sm,
     color: COLORS.text,
-    fontFamily: FONTS.mono,
     fontSize: 15,
+    fontWeight: '700',
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
@@ -293,13 +410,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: COLORS.surfaceRaised,
-    borderRadius: RADIUS.sm,
-    padding: 10,
+    borderRadius: RADIUS.md,
+    padding: 12,
     borderWidth: 1,
     borderColor: COLORS.border,
   },
   sigRowPos: { borderColor: COLORS.emerald, backgroundColor: COLORS.emeraldDim },
-  sigTitle: { fontSize: 13, fontWeight: '700', color: COLORS.text },
-  sigSub: { fontFamily: FONTS.mono, fontSize: 11, color: COLORS.textSecondary, marginTop: 2 },
-  evText: { fontFamily: FONTS.mono, fontSize: 13, fontWeight: '700' },
+  sigTitle: { fontSize: 14, fontWeight: '700', color: COLORS.text },
+  sigSub: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
+  evText: { fontSize: 13, fontWeight: '800' },
 });

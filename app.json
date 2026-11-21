@@ -2,7 +2,7 @@
   "expo": {
     "name": "EdgeLedger Predictor",
     "slug": "edgeledger-android",
-    "version": "1.0.0",
+    "version": "2.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "edgeledger",
@@ -15,7 +15,7 @@
     },
     "android": {
       "package": "com.edgeledger.predictor",
-      "versionCode": 1,
+      "versionCode": 3,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0B0F17"

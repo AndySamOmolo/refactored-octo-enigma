@@ -2,44 +2,45 @@ import React from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useAppState } from '../../src/context/AppStateContext';
 import { SPORT_META } from '../../src/data/sources';
-import { COLORS, FONTS, RADIUS, SPACING } from '../../src/theme';
+import { COLORS, RADIUS, SPACING } from '../../src/theme';
 
-export default function AuditScreen() {
+export default function AccuracyScreen() {
   const { modelState } = useAppState();
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.heading}>Walk-Forward Out-of-Sample Audit</Text>
+      <Text style={styles.heading}>How Accurate Are Our Predictions?</Text>
       <Text style={styles.sub}>
-        Every league is scored strictly chronologically before updating ratings with each match result. Lower Brier Score and Log-Loss indicate better probability calibration than the naive baseline.
+        We test the app on past games one week at a time—without peeking ahead—so you can see where our percentages are most reliable.
       </Text>
 
       {modelState.backtests.map((bt) => {
-        const beatsBrier = bt.modelBrier < bt.baselineBrier;
+        const beatsSimpleGuess = bt.modelBrier < bt.baselineBrier;
+        // Convert internal error score into a friendly 0–100 Accuracy Score
+        const accuracyScore = Math.max(40, Math.min(98, Math.round((1 - bt.modelBrier * 0.75) * 100)));
+
         return (
           <View key={bt.leagueId} style={styles.panel}>
             <View style={styles.rowBetween}>
               <Text style={styles.leagueTitle}>
-                {SPORT_META[bt.sport].short} · {bt.leagueName}
+                {SPORT_META[bt.sport].label} · {bt.leagueName}
               </Text>
-              <Text style={[styles.badge, beatsBrier ? styles.badgeOk : styles.badgeWarn]}>
-                {beatsBrier ? 'BEATS BASELINE' : 'NEEDS MORE DATA'}
+              <Text style={[styles.badge, beatsSimpleGuess ? styles.badgeOk : styles.badgeWarn]}>
+                {beatsSimpleGuess ? 'Strong Track Record' : 'Building History'}
               </Text>
             </View>
 
             <View style={styles.metricsRow}>
               <View style={styles.metricBox}>
-                <Text style={styles.mLabel}>BRIER</Text>
-                <Text style={styles.mVal}>{bt.modelBrier.toFixed(4)}</Text>
-                <Text style={styles.mSub}>base {bt.baselineBrier.toFixed(4)}</Text>
+                <Text style={styles.mLabel}>Accuracy Score</Text>
+                <Text style={styles.mVal}>{accuracyScore}/100</Text>
               </View>
               <View style={styles.metricBox}>
-                <Text style={styles.mLabel}>LOG-LOSS</Text>
-                <Text style={styles.mVal}>{bt.modelLogLoss.toFixed(4)}</Text>
-                <Text style={styles.mSub}>base {bt.baselineLogLoss.toFixed(4)}</Text>
+                <Text style={styles.mLabel}>Games Tested</Text>
+                <Text style={styles.mVal}>{bt.sampleSize}</Text>
               </View>
               <View style={styles.metricBox}>
-                <Text style={styles.mLabel}>SIM ROI</Text>
+                <Text style={styles.mLabel}>Practice Profit</Text>
                 <Text
                   style={[
                     styles.mVal,
@@ -49,14 +50,12 @@ export default function AuditScreen() {
                   {bt.simulatedRoiPct >= 0 ? '+' : ''}
                   {bt.simulatedRoiPct.toFixed(1)}%
                 </Text>
-                <Text style={styles.mSub}>n={bt.sampleSize}</Text>
               </View>
             </View>
 
-            {/* Calibration Reliability Bars */}
             {bt.calibrationBins.length > 0 && (
               <View style={{ gap: 6, marginTop: 4 }}>
-                <Text style={styles.mLabel}>CALIBRATION (PREDICTED VS ACTUAL WIN RATE)</Text>
+                <Text style={styles.subHead}>When we predict a win chance, how often do they actually win?</Text>
                 {bt.calibrationBins.map((bin) => (
                   <View key={bin.binLabel} style={styles.binRow}>
                     <Text style={styles.binLabel}>{bin.binLabel}</Text>
@@ -69,7 +68,7 @@ export default function AuditScreen() {
                       />
                     </View>
                     <Text style={styles.binVal}>
-                      {(bin.actualRate * 100).toFixed(0)}% (n={bin.count})
+                      Won {Math.round(bin.actualRate * 100)}% ({bin.count})
                     </Text>
                   </View>
                 ))}
@@ -79,17 +78,17 @@ export default function AuditScreen() {
         );
       })}
 
-      {/* Keyless Public Feed Sync Health */}
+      {/* Free Public Data Sources Health */}
       <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>FREE PUBLIC DATA FEED STATUS</Text>
+        <Text style={styles.sectionTitle}>Free Public Data Sources (Synced On Your Phone)</Text>
         {modelState.feedStatuses.map((fs) => (
           <View key={fs.feedId} style={styles.feedRow}>
             <View style={{ flex: 1 }}>
               <Text style={styles.feedName}>{fs.label}</Text>
               <Text style={styles.feedMeta}>
                 {fs.recordsParsed > 0
-                  ? `${fs.recordsParsed} records parsed on-device`
-                  : fs.errorMessage ?? 'Offline seed cached'}
+                  ? `${fs.recordsParsed} games loaded on your device`
+                  : fs.errorMessage ?? 'Using built-in offline starter data'}
               </Text>
             </View>
             <Text
@@ -102,7 +101,7 @@ export default function AuditScreen() {
                   : { color: COLORS.crimson },
               ]}
             >
-              {fs.status.toUpperCase()}
+              {fs.status === 'ok' ? 'LIVE' : fs.status === 'cached' ? 'OFFLINE' : 'RETRY'}
             </Text>
           </View>
         ))}
@@ -114,25 +113,24 @@ export default function AuditScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.bg },
   content: { padding: SPACING.md, gap: 14, paddingBottom: 36 },
-  heading: { fontSize: 20, fontWeight: '700', color: COLORS.text },
+  heading: { fontSize: 20, fontWeight: '800', color: COLORS.text },
   sub: { fontSize: 13, color: COLORS.textMuted, lineHeight: 19 },
   panel: {
     backgroundColor: COLORS.surface,
-    borderRadius: RADIUS.md,
+    borderRadius: RADIUS.lg,
     borderWidth: 1,
     borderColor: COLORS.border,
-    padding: SPACING.md,
+    padding: 16,
     gap: 10,
   },
   rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  leagueTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text },
+  leagueTitle: { fontSize: 15, fontWeight: '800', color: COLORS.text },
   badge: {
-    fontFamily: FONTS.mono,
-    fontSize: 10,
+    fontSize: 11,
     fontWeight: '700',
-    paddingHorizontal: 8,
+    paddingHorizontal: 9,
     paddingVertical: 3,
-    borderRadius: RADIUS.sm,
+    borderRadius: RADIUS.pill,
     overflow: 'hidden',
   },
   badgeOk: { backgroundColor: COLORS.emeraldDim, color: COLORS.emerald },
@@ -141,34 +139,34 @@ const styles = StyleSheet.create({
   metricBox: {
     flex: 1,
     backgroundColor: COLORS.surfaceRaised,
-    borderRadius: RADIUS.sm,
+    borderRadius: RADIUS.md,
     padding: 10,
     alignItems: 'center',
   },
-  mLabel: { fontFamily: FONTS.mono, fontSize: 10, color: COLORS.textMuted },
-  mVal: { fontFamily: FONTS.mono, fontSize: 15, fontWeight: '700', color: COLORS.text, marginTop: 2 },
-  mSub: { fontFamily: FONTS.mono, fontSize: 10, color: COLORS.textSecondary, marginTop: 2 },
+  mLabel: { fontSize: 11, fontWeight: '600', color: COLORS.textMuted },
+  mVal: { fontSize: 16, fontWeight: '800', color: COLORS.text, marginTop: 3 },
+  subHead: { fontSize: 12, fontWeight: '600', color: COLORS.textSecondary },
   binRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  binLabel: { fontFamily: FONTS.mono, fontSize: 11, color: COLORS.textSecondary, width: 52 },
+  binLabel: { fontSize: 11, fontWeight: '700', color: COLORS.textSecondary, width: 52 },
   barTrack: {
     flex: 1,
-    height: 8,
+    height: 9,
     backgroundColor: COLORS.surfaceRaised,
-    borderRadius: 4,
+    borderRadius: 5,
     overflow: 'hidden',
   },
   barActual: { height: '100%', backgroundColor: COLORS.accent },
-  binVal: { fontFamily: FONTS.mono, fontSize: 11, color: COLORS.textMuted, width: 72, textAlign: 'right' },
-  sectionTitle: { fontFamily: FONTS.mono, fontSize: 11, fontWeight: '700', color: COLORS.textSecondary },
+  binVal: { fontSize: 11, fontWeight: '600', color: COLORS.textMuted, width: 82, textAlign: 'right' },
+  sectionTitle: { fontSize: 15, fontWeight: '800', color: COLORS.text },
   feedRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 6,
+    paddingVertical: 7,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
-  feedName: { fontSize: 13, fontWeight: '600', color: COLORS.text },
-  feedMeta: { fontFamily: FONTS.mono, fontSize: 11, color: COLORS.textMuted, marginTop: 2 },
-  feedStatus: { fontFamily: FONTS.mono, fontSize: 11, fontWeight: '700' },
+  feedName: { fontSize: 13, fontWeight: '700', color: COLORS.text },
+  feedMeta: { fontSize: 11.5, color: COLORS.textMuted, marginTop: 2 },
+  feedStatus: { fontSize: 11, fontWeight: '800' },
 });

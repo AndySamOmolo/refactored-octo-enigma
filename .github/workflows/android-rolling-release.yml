@@ -5,7 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # Optional weekly automated rebuild every Monday at 04:00 UTC
     - cron: '0 4 * * 1'
 
 permissions:
@@ -30,7 +29,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
 
       - name: Setup Java 17 (Temurin)
         uses: actions/setup-java@v4
@@ -38,8 +36,8 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
@@ -84,12 +82,11 @@ jobs:
           sha256sum dist/edgeledger-android-latest.apk > dist/edgeledger-android-latest.apk.sha256
           BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
           cat <<EOF > dist/release-notes.md
-          ### EdgeLedger Android — Rolling Latest Build
+          ### EdgeLedger Android v2.0 — Rolling Latest Build
           - **Built:** ${BUILD_DATE}
           - **Commit:** \`${GITHUB_SHA::8}\`
-          - **Offline Engine:** On-device Dixon-Coles + Multi-Sport Elo + Surface Tennis Elo + Quarter-Kelly
-          - **Data Sync:** Pulls free keyless public sports feeds directly on-device once every 7 days (or manually via **SYNC NOW**).
-          - **Note:** This rolling \`latest\` release automatically overwrites the previous APK on every build.
+          - **Multi-Market Engine:** Match Winner, Double Chance, Draw No Bet, Over/Under Goals, 1st Half, Corners, Cards, Shots on Target, Spreads/Totals & Tennis Sets/Games/Aces.
+          - **100% Free & Offline-First:** Syncs free public sports data directly on your phone once a week.
           EOF
 
       - name: Force-move rolling 'latest' tag to current commit

@@ -1,9 +1,5 @@
 import { HistoricalMatch, SportId, TennisSurface } from '../types';
 
-/**
- * RFC-4180 compliant zero-dependency CSV parser that handles quoted fields,
- * escaped quotes (""), and CRLF/LF line endings cleanly on-device.
- */
 export function parseCsv(text: string): Record<string, string>[] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -31,9 +27,7 @@ export function parseCsv(text: string): Record<string, string>[] {
       field = '';
     } else if (ch === '\n') {
       row.push(field.trim());
-      if (row.some((cell) => cell.length > 0)) {
-        rows.push(row);
-      }
+      if (row.some((cell) => cell.length > 0)) rows.push(row);
       row = [];
       field = '';
     } else if (ch !== '\r') {
@@ -42,11 +36,8 @@ export function parseCsv(text: string): Record<string, string>[] {
   }
   if (field.length > 0 || row.length > 0) {
     row.push(field.trim());
-    if (row.some((cell) => cell.length > 0)) {
-      rows.push(row);
-    }
+    if (row.some((cell) => cell.length > 0)) rows.push(row);
   }
-
   if (rows.length < 2) return [];
   const headers = rows[0];
   const out: Record<string, string>[] = [];
@@ -104,13 +95,9 @@ const TEAM_ALIASES: Record<string, string> = {
 export function canonicalizeTeamName(raw: string): string {
   const trimmed = raw.trim().replace(/\s+/g, ' ');
   if (!trimmed) return trimmed;
-  const key = trimmed.toLowerCase();
-  return TEAM_ALIASES[key] ?? trimmed;
+  return TEAM_ALIASES[trimmed.toLowerCase()] ?? trimmed;
 }
 
-/**
- * Parses Football-Data.co.uk date strings (DD/MM/YYYY or DD/MM/YY) into YYYY-MM-DD.
- */
 export function parseFootballDataDate(raw: string): string | null {
   const s = raw.trim();
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
@@ -128,8 +115,16 @@ function parsePositiveFloat(raw?: string): number | undefined {
   return Number.isFinite(n) && n > 1.01 ? n : undefined;
 }
 
+function parseOptionalNum(raw?: string): number | null {
+  if (raw === undefined || raw === '') return null;
+  const n = Number.parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 /**
- * Parses Football-Data.co.uk CSV into HistoricalMatch rows with closing market odds.
+ * Parses ALL free columns from Football-Data.co.uk CSVs:
+ * Goals, Half-Time Goals, Shots, Shots on Target, Corners, Fouls,
+ * Yellow/Red Cards, 1X2 Odds, and Over/Under 2.5 Odds.
  */
 export function parseFootballDataCsv(
   csvText: string,
@@ -150,19 +145,6 @@ export function parseFootballDataCsv(
       continue;
     }
 
-    const oddsHome =
-      parsePositiveFloat(r.AvgH) ??
-      parsePositiveFloat(r.B365H) ??
-      parsePositiveFloat(r.PSH);
-    const oddsDraw =
-      parsePositiveFloat(r.AvgD) ??
-      parsePositiveFloat(r.B365D) ??
-      parsePositiveFloat(r.PSD);
-    const oddsAway =
-      parsePositiveFloat(r.AvgA) ??
-      parsePositiveFloat(r.B365A) ??
-      parsePositiveFloat(r.PSA);
-
     matches.push({
       id: `fd-${leagueId}-${date}-${homeTeam}-${awayTeam}`,
       sport: 'football',
@@ -172,33 +154,54 @@ export function parseFootballDataCsv(
       awayTeam,
       homeScore: fthg,
       awayScore: ftag,
-      oddsHome,
-      oddsDraw,
-      oddsAway,
+      oddsHome:
+        parsePositiveFloat(r.AvgH) ?? parsePositiveFloat(r.B365H) ?? parsePositiveFloat(r.PSH),
+      oddsDraw:
+        parsePositiveFloat(r.AvgD) ?? parsePositiveFloat(r.B365D) ?? parsePositiveFloat(r.PSD),
+      oddsAway:
+        parsePositiveFloat(r.AvgA) ?? parsePositiveFloat(r.B365A) ?? parsePositiveFloat(r.PSA),
+      homeHalfTimeGoals: parseOptionalNum(r.HTHG),
+      awayHalfTimeGoals: parseOptionalNum(r.HTAG),
+      homeShots: parseOptionalNum(r.HS),
+      awayShots: parseOptionalNum(r.AS),
+      homeShotsOnTarget: parseOptionalNum(r.HST),
+      awayShotsOnTarget: parseOptionalNum(r.AST),
+      homeCorners: parseOptionalNum(r.HC),
+      awayCorners: parseOptionalNum(r.AC),
+      homeFouls: parseOptionalNum(r.HF),
+      awayFouls: parseOptionalNum(r.AF),
+      homeYellowCards: parseOptionalNum(r.HY),
+      awayYellowCards: parseOptionalNum(r.AY),
+      homeRedCards: parseOptionalNum(r.HR),
+      awayRedCards: parseOptionalNum(r.AR),
+      avgOver25Odds: parsePositiveFloat(r['Avg>2.5']) ?? parsePositiveFloat(r['B365>2.5']) ?? null,
+      avgUnder25Odds: parsePositiveFloat(r['Avg<2.5']) ?? parsePositiveFloat(r['B365<2.5']) ?? null,
     });
   }
 
   return matches;
 }
 
-/**
- * Parses ClubElo daily CSV into a canonical team -> Elo map.
- */
 export function parseClubEloCsv(csvText: string): Record<string, number> {
   const rows = parseCsv(csvText);
   const map: Record<string, number> = {};
   for (const r of rows) {
     const club = canonicalizeTeamName(r.Club || '');
     const elo = Number.parseFloat(r.Elo || '');
-    if (club && Number.isFinite(elo)) {
-      map[club] = Math.round(elo);
-    }
+    if (club && Number.isFinite(elo)) map[club] = Math.round(elo);
   }
   return map;
 }
 
+export function americanToDecimal(ml: number): number | undefined {
+  if (!Number.isFinite(ml) || ml === 0) return undefined;
+  if (ml > 0) return Number((1 + ml / 100).toFixed(3));
+  return Number((1 + 100 / Math.abs(ml)).toFixed(3));
+}
+
 /**
- * Parses nflverse games.csv into HistoricalMatch records (recent 3 seasons).
+ * Parses ALL free columns from nflverse games.csv:
+ * scores, spread_line, total_line, home_rest, away_rest, moneylines.
  */
 export function parseNflverseGamesCsv(
   csvText: string,
@@ -230,15 +233,13 @@ export function parseNflverseGamesCsv(
       awayScore,
       oddsHome: americanToDecimal(Number.parseFloat(r.home_moneyline || '')),
       oddsAway: americanToDecimal(Number.parseFloat(r.away_moneyline || '')),
+      spreadLine: parseOptionalNum(r.spread_line),
+      totalLine: parseOptionalNum(r.total_line),
+      homeRestDays: parseOptionalNum(r.home_rest),
+      awayRestDays: parseOptionalNum(r.away_rest),
     });
   }
   return matches;
-}
-
-export function americanToDecimal(ml: number): number | undefined {
-  if (!Number.isFinite(ml) || ml === 0) return undefined;
-  if (ml > 0) return Number((1 + ml / 100).toFixed(3));
-  return Number((1 + 100 / Math.abs(ml)).toFixed(3));
 }
 
 function normalizeSurface(raw: string): TennisSurface {
@@ -249,7 +250,8 @@ function normalizeSurface(raw: string): TennisSurface {
 }
 
 /**
- * Parses TennisMyLife / Sackmann-style ATP CSV into HistoricalMatch records.
+ * Parses ALL free columns from TennisMyLife ATP CSVs:
+ * surface, aces, double faults, service points, 1st-serve in & won.
  */
 export function parseTmlTennisCsv(csvText: string): HistoricalMatch[] {
   const rows = parseCsv(csvText);
@@ -273,6 +275,16 @@ export function parseTmlTennisCsv(csvText: string): HistoricalMatch[] {
       homeScore: 2,
       awayScore: 0,
       surface: normalizeSurface(r.surface || 'Hard'),
+      homeAces: parseOptionalNum(r.w_ace),
+      awayAces: parseOptionalNum(r.l_ace),
+      homeDoubleFaults: parseOptionalNum(r.w_df),
+      awayDoubleFaults: parseOptionalNum(r.l_df),
+      homeServicePoints: parseOptionalNum(r.w_svpt),
+      awayServicePoints: parseOptionalNum(r.l_svpt),
+      homeFirstServeIn: parseOptionalNum(r.w_1stIn),
+      awayFirstServeIn: parseOptionalNum(r.l_1stIn),
+      homeFirstServeWon: parseOptionalNum(r.w_1stWon),
+      awayFirstServeWon: parseOptionalNum(r.l_1stWon),
     });
   }
 
@@ -292,9 +304,6 @@ export interface ParsedEspnEvent {
   oddsAway?: number;
 }
 
-/**
- * Parses ESPN public keyless scoreboard JSON across Soccer, NFL, NBA, NHL, MLB, and Tennis.
- */
 export function parseEspnScoreboardJson(
   payload: unknown,
   sport: SportId
@@ -313,10 +322,8 @@ export function parseEspnScoreboardJson(
     const competitors = comp.competitors as Array<Record<string, unknown>> | undefined;
     if (!competitors || competitors.length < 2) continue;
 
-    const home =
-      competitors.find((c) => c.homeAway === 'home') ?? competitors[0];
-    const away =
-      competitors.find((c) => c.homeAway === 'away') ?? competitors[1];
+    const home = competitors.find((c) => c.homeAway === 'home') ?? competitors[0];
+    const away = competitors.find((c) => c.homeAway === 'away') ?? competitors[1];
 
     const extractName = (c: Record<string, unknown>): string => {
       const team = c.team as Record<string, unknown> | undefined;
@@ -334,13 +341,11 @@ export function parseEspnScoreboardJson(
       | Record<string, unknown>
       | undefined;
     const completed = Boolean(status?.completed);
-
     const homeScore =
       home.score !== undefined ? Number.parseInt(String(home.score), 10) : undefined;
     const awayScore =
       away.score !== undefined ? Number.parseInt(String(away.score), 10) : undefined;
 
-    // Optional ESPN embedded odds (if available in public payload)
     let oddsHome: number | undefined;
     let oddsDraw: number | undefined;
     let oddsAway: number | undefined;

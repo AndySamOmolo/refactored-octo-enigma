@@ -1,23 +1,56 @@
+import type { FullMarketPrediction } from './engine/marketPredictor';
+import type { HeadToHeadSummary, RichTeamProfile } from './engine/teamStats';
+
 export type SportId = 'football' | 'nfl' | 'nba' | 'nhl' | 'mlb' | 'tennis';
-
 export type MarketType = '1X2' | 'H2H' | 'OVER_25' | 'BTTS';
-
 export type TennisSurface = 'Hard' | 'Clay' | 'Grass';
 
 export interface HistoricalMatch {
   id: string;
   sport: SportId;
   leagueId: string;
-  date: string; // ISO YYYY-MM-DD
+  date: string;
   homeTeam: string;
   awayTeam: string;
   homeScore: number;
   awayScore: number;
   surface?: TennisSurface;
-  /** Optional closing market decimal odds for backtest calibration & CLV */
   oddsHome?: number;
   oddsDraw?: number;
   oddsAway?: number;
+  // Football-Data.co.uk extra free columns
+  homeHalfTimeGoals?: number | null;
+  awayHalfTimeGoals?: number | null;
+  homeShots?: number | null;
+  awayShots?: number | null;
+  homeShotsOnTarget?: number | null;
+  awayShotsOnTarget?: number | null;
+  homeCorners?: number | null;
+  awayCorners?: number | null;
+  homeFouls?: number | null;
+  awayFouls?: number | null;
+  homeYellowCards?: number | null;
+  awayYellowCards?: number | null;
+  homeRedCards?: number | null;
+  awayRedCards?: number | null;
+  avgOver25Odds?: number | null;
+  avgUnder25Odds?: number | null;
+  // nflverse extra free columns
+  spreadLine?: number | null;
+  totalLine?: number | null;
+  homeRestDays?: number | null;
+  awayRestDays?: number | null;
+  // TennisMyLife extra free columns
+  homeAces?: number | null;
+  awayAces?: number | null;
+  homeDoubleFaults?: number | null;
+  awayDoubleFaults?: number | null;
+  homeServicePoints?: number | null;
+  awayServicePoints?: number | null;
+  homeFirstServeIn?: number | null;
+  awayFirstServeIn?: number | null;
+  homeFirstServeWon?: number | null;
+  awayFirstServeWon?: number | null;
 }
 
 export interface DixonColesParams {
@@ -52,7 +85,7 @@ export interface ScorelineProb {
 
 export interface MatchPrediction {
   probHome: number;
-  probDraw: number; // 0 for 2-way sports (NFL/NBA/NHL/MLB/Tennis)
+  probDraw: number;
   probAway: number;
   expectedHomeGoals?: number;
   expectedAwayGoals?: number;
@@ -60,7 +93,7 @@ export interface MatchPrediction {
   probBtts?: number;
   topScorelines?: ScorelineProb[];
   modelSource: 'dixon-coles+elo' | 'elo-mov' | 'surface-elo';
-  confidenceScore: number; // 0..100 based on sample size & rating convergence
+  confidenceScore: number;
 }
 
 export interface ValueSignal {
@@ -70,8 +103,8 @@ export interface ValueSignal {
   impliedProb: number;
   fairMarketProb: number;
   decimalOdds: number;
-  expectedValue: number; // e.g. +0.045 = +4.5% EV
-  kellyFraction: number; // Recommended fractional Kelly stake (capped at 5%)
+  expectedValue: number;
+  kellyFraction: number;
   isValue: boolean;
 }
 
@@ -92,6 +125,12 @@ export interface UpcomingFixture {
   };
   prediction: MatchPrediction;
   bestSignal?: ValueSignal;
+  /** Comprehensive multi-market predictions (Double Chance, Over/Under, 1st Half, Corners, Cards, Spreads, Sets) */
+  markets: FullMarketPrediction;
+  /** Plain-English 3–4 bullet reasons explaining why we lean toward the pick */
+  plainInsights: string[];
+  /** Head-to-head summary between these two teams/players */
+  headToHead?: HeadToHeadSummary;
 }
 
 export interface CalibrationBin {
@@ -143,11 +182,11 @@ export interface PaperBet {
 
 export interface UserSettings {
   bankroll: number;
-  kellyMultiplier: number; // default 0.25 (Quarter-Kelly)
-  maxStakePct: number; // default 0.05 (5% hard cap)
-  minEvThreshold: number; // default 0.03 (+3.0% EV)
-  autoSyncWeekly: boolean; // default true (7-day interval)
-  syncIntervalDays: number; // default 7
+  kellyMultiplier: number; // 0.15 Safe, 0.25 Balanced, 0.40 Bold
+  maxStakePct: number;
+  minEvThreshold: number;
+  autoSyncWeekly: boolean;
+  syncIntervalDays: number;
   enabledSports: SportId[];
 }
 
@@ -158,6 +197,7 @@ export interface SyncedModelState {
   isSeedData: boolean;
   totalHistoricalMatches: number;
   ratings: Record<string, TeamRating>;
+  teamProfiles: Record<string, RichTeamProfile>;
   dixonColes: Record<string, DixonColesParams>;
   fixtures: UpcomingFixture[];
   backtests: LeagueBacktestSummary[];

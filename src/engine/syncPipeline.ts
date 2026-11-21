@@ -36,6 +36,13 @@ import {
 } from './eloEngine';
 import { evaluateMatchSignals } from './kelly';
 import { runWalkForwardBacktest } from './backtester';
+import {
+  computeHeadToHead,
+  computeRichTeamProfiles,
+  generatePlainEnglishInsights,
+  profileKey,
+} from './teamStats';
+import { FullMarketPrediction, predictAllMarkets } from './marketPredictor';
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
   bankroll: 1000,
@@ -47,10 +54,6 @@ export const DEFAULT_USER_SETTINGS: UserSettings = {
   enabledSports: ['football', 'nfl', 'nba', 'nhl', 'mlb', 'tennis'],
 };
 
-/**
- * Returns true if the local model pack is older than the configured weekly interval
- * (default 7 days) and auto-sync is enabled.
- */
 export function shouldAutoSyncWeekly(
   state: SyncedModelState | null,
   settings: UserSettings,
@@ -75,11 +78,6 @@ function getLeagueDisplayName(sport: SportId, leagueId: string): string {
   return SPORT_META[sport].label;
 }
 
-/**
- * Pure on-device modeling orchestrator: fits Dixon-Coles for every football league,
- * Multi-Sport Elo + ClubElo + Surface Tennis Elo across all sports, runs walk-forward
- * backtests, and scores all upcoming fixtures with calibrated probabilities & EV signals.
- */
 export function buildModelState(params: {
   historicalMatches: HistoricalMatch[];
   clubEloMap: Record<string, number>;
@@ -102,21 +100,26 @@ export function buildModelState(params: {
   const now = params.now ?? new Date();
   const todayIso = now.toISOString().slice(0, 10);
 
-  // 1. Fit Multi-Sport Elo + ClubElo anchor + Surface Tennis Elo
+  // 1. Fit Multi-Sport Elo + ClubElo + Surface Tennis Elo
   const ratings: Record<string, TeamRating> = fitMultiSportElo(
     params.historicalMatches,
     params.clubEloMap
   );
 
-  // 2. Group matches by league for Dixon-Coles & Walk-Forward Backtests
+  const eloLookup: Record<string, number> = {};
+  for (const [k, r] of Object.entries(ratings)) {
+    eloLookup[k] = r.elo;
+  }
+
+  // 2. Build rich per-team profiles utilizing ALL free CSV columns
+  const teamProfiles = computeRichTeamProfiles(params.historicalMatches, eloLookup);
+
+  // 3. Group matches by league for Dixon-Coles & Walk-Forward Backtests
   const byLeague = new Map<string, { sport: SportId; matches: HistoricalMatch[] }>();
   for (const m of params.historicalMatches) {
     const existing = byLeague.get(m.leagueId);
-    if (existing) {
-      existing.matches.push(m);
-    } else {
-      byLeague.set(m.leagueId, { sport: m.sport, matches: [m] });
-    }
+    if (existing) existing.matches.push(m);
+    else byLeague.set(m.leagueId, { sport: m.sport, matches: [m] });
   }
 
   const dixonColes: Record<string, DixonColesParams> = {};
@@ -126,8 +129,6 @@ export function buildModelState(params: {
     if (bucket.sport === 'football' && bucket.matches.length >= 10) {
       const dcParams = fitDixonColesLeague(leagueId, bucket.matches, todayIso);
       dixonColes[leagueId] = dcParams;
-
-      // Attach attack/defense strengths onto TeamRating records for UI inspection
       for (const team of Object.keys(dcParams.attack)) {
         const key = ratingKey('football', team);
         if (ratings[key]) {
@@ -149,20 +150,124 @@ export function buildModelState(params: {
     }
   }
 
-  // 3. Score upcoming fixtures & attach ValueSignals
+  // 4. Score upcoming fixtures across ALL markets + plain-English insights
   const fixtures: UpcomingFixture[] = params.rawUpcoming.map((fx) => {
     const rH = ratings[ratingKey(fx.sport, fx.homeTeam)];
     const rA = ratings[ratingKey(fx.sport, fx.awayTeam)];
-    const eloPred = predictEloMatch(fx.sport, rH, rA, fx.surface);
+    const pH = teamProfiles[profileKey(fx.sport, fx.homeTeam)];
+    const pA = teamProfiles[profileKey(fx.sport, fx.awayTeam)];
+    const h2h = computeHeadToHead(params.historicalMatches, fx.sport, fx.homeTeam, fx.awayTeam);
 
+    const eloPred = predictEloMatch(fx.sport, rH, rA, fx.surface);
     let prediction = eloPred;
     if (fx.sport === 'football' && dixonColes[fx.leagueId]) {
-      const dcPred = predictDixonColesMatch(
-        dixonColes[fx.leagueId],
-        fx.homeTeam,
-        fx.awayTeam
-      );
+      const dcPred = predictDixonColesMatch(dixonColes[fx.leagueId], fx.homeTeam, fx.awayTeam);
       prediction = blendFootballPredictions(dcPred, eloPred, 0.7);
+    }
+
+    // Build comprehensive multi-market predictions
+    let markets: FullMarketPrediction;
+    if (fx.sport === 'football') {
+      markets = predictAllMarkets({
+        sport: 'football',
+        home: {
+          name: fx.homeTeam,
+          strengthRating: rH?.elo,
+          goalsForAvg: pH?.avgScored ?? 1.4,
+          goalsAgainstAvg: pH?.avgConceded ?? 1.2,
+          splitGoalsForAvg: pH?.homeAvgScored,
+          splitGoalsAgainstAvg: pH?.homeAvgConceded,
+          shotsOnTargetForAvg: pH?.football?.shotsOnTargetPerGame,
+          shotsOnTargetAgainstAvg: pH?.football?.shotsOnTargetConcededPerGame,
+          totalShotsForAvg: pH?.football?.shotsPerGame,
+          totalShotsAgainstAvg: pH?.football?.shotsConcededPerGame,
+          foulsForAvg: pH?.football?.foulsPerGame,
+          firstHalfGoalsForAvg: pH?.football?.avgFirstHalfGoalsScored,
+          firstHalfGoalsAgainstAvg: pH?.football?.avgFirstHalfGoalsConceded,
+          cornersForAvg: pH?.football?.cornersPerGame,
+          cornersAgainstAvg: pH?.football?.cornersConcededPerGame,
+          yellowCardsAvg: pH?.football?.yellowCardsPerGame,
+          redCardsAvg: pH?.football?.redCardsPerGame,
+          recentForm: pH?.recentMatches,
+        },
+        away: {
+          name: fx.awayTeam,
+          strengthRating: rA?.elo,
+          goalsForAvg: pA?.avgScored ?? 1.3,
+          goalsAgainstAvg: pA?.avgConceded ?? 1.3,
+          splitGoalsForAvg: pA?.awayAvgScored,
+          splitGoalsAgainstAvg: pA?.awayAvgConceded,
+          shotsOnTargetForAvg: pA?.football?.shotsOnTargetPerGame,
+          shotsOnTargetAgainstAvg: pA?.football?.shotsOnTargetConcededPerGame,
+          totalShotsForAvg: pA?.football?.shotsPerGame,
+          totalShotsAgainstAvg: pA?.football?.shotsConcededPerGame,
+          foulsForAvg: pA?.football?.foulsPerGame,
+          firstHalfGoalsForAvg: pA?.football?.avgFirstHalfGoalsScored,
+          firstHalfGoalsAgainstAvg: pA?.football?.avgFirstHalfGoalsConceded,
+          cornersForAvg: pA?.football?.cornersPerGame,
+          cornersAgainstAvg: pA?.football?.cornersConcededPerGame,
+          yellowCardsAvg: pA?.football?.yellowCardsPerGame,
+          redCardsAvg: pA?.football?.redCardsPerGame,
+          recentForm: pA?.recentMatches,
+        },
+        headToHead: {
+          meetings: h2h.totalMeetings,
+          homeWins: h2h.homeTeamWins,
+          draws: h2h.draws,
+          awayWins: h2h.awayTeamWins,
+          avgHomeScore: h2h.avgHomeTeamScored,
+          avgAwayScore: h2h.avgAwayTeamScored,
+        },
+      });
+    } else if (fx.sport === 'tennis') {
+      markets = predictAllMarkets({
+        sport: 'atp_tennis',
+        surface: fx.surface ?? 'Hard',
+        playerA: {
+          name: fx.homeTeam,
+          overallRating: rH?.elo,
+          surfaceRatings: rH?.surfaceElo,
+          surfaceWinRate: (pH?.tennis?.surfaceSplits[fx.surface ?? 'Hard'].winPct ?? 55) / 100,
+          firstServeWonPct: (pH?.tennis?.firstServeWinPct ?? 73) / 100,
+          acesPerMatchAvg: pH?.tennis?.avgAcesPerMatch,
+          doubleFaultsAvg: pH?.tennis?.avgDoubleFaultsPerMatch,
+          recentForm: pH?.recentMatches,
+        },
+        playerB: {
+          name: fx.awayTeam,
+          overallRating: rA?.elo,
+          surfaceRatings: rA?.surfaceElo,
+          surfaceWinRate: (pA?.tennis?.surfaceSplits[fx.surface ?? 'Hard'].winPct ?? 55) / 100,
+          firstServeWonPct: (pA?.tennis?.firstServeWinPct ?? 73) / 100,
+          acesPerMatchAvg: pA?.tennis?.avgAcesPerMatch,
+          doubleFaultsAvg: pA?.tennis?.avgDoubleFaultsPerMatch,
+          recentForm: pA?.recentMatches,
+        },
+      });
+    } else {
+      markets = predictAllMarkets({
+        sport: fx.sport,
+        home: {
+          name: fx.homeTeam,
+          strengthRating: rH?.elo,
+          offenseAvg: pH?.avgScored ?? (fx.sport === 'nba' ? 113 : fx.sport === 'nfl' ? 23 : 3.2),
+          defenseAvg: pH?.avgConceded ?? (fx.sport === 'nba' ? 112 : fx.sport === 'nfl' ? 21 : 3.0),
+          splitOffenseAvg: pH?.homeAvgScored,
+          splitDefenseAvg: pH?.homeAvgConceded,
+          recentForm: pH?.recentMatches,
+          restDays: pH?.nfl?.avgRestDays,
+        },
+        away: {
+          name: fx.awayTeam,
+          strengthRating: rA?.elo,
+          offenseAvg: pA?.avgScored ?? (fx.sport === 'nba' ? 112 : fx.sport === 'nfl' ? 22 : 3.0),
+          defenseAvg: pA?.avgConceded ?? (fx.sport === 'nba' ? 113 : fx.sport === 'nfl' ? 22 : 3.1),
+          splitOffenseAvg: pA?.awayAvgScored,
+          splitDefenseAvg: pA?.awayAvgConceded,
+          recentForm: pA?.recentMatches,
+          restDays: pA?.nfl?.avgRestDays,
+        },
+      });
     }
 
     const evalRes = fx.marketOdds
@@ -173,17 +278,37 @@ export function buildModelState(params: {
         })
       : { signals: [], bestSignal: undefined };
 
+    const favoredSide: 'home' | 'away' | 'draw' =
+      prediction.probHome >= prediction.probAway && prediction.probHome >= prediction.probDraw
+        ? 'home'
+        : prediction.probAway >= prediction.probDraw
+        ? 'away'
+        : 'draw';
+
+    const plainInsights = generatePlainEnglishInsights(
+      pH,
+      pA,
+      h2h,
+      fx.sport,
+      favoredSide,
+      fx.surface
+    );
+
     return {
       ...fx,
       prediction,
       bestSignal: evalRes.bestSignal,
+      markets,
+      plainInsights,
+      headToHead: h2h,
     };
   });
 
-  // Sort fixtures: highest EV value signals first, then chronological kickoff
   fixtures.sort((a, b) => {
-    const evA = a.bestSignal?.expectedValue ?? -999;
-    const evB = b.bestSignal?.expectedValue ?? -999;
+    const topA = a.markets.topPicks[0]?.chancePct ?? 0;
+    const topB = b.markets.topPicks[0]?.chancePct ?? 0;
+    const evA = a.bestSignal?.isValue ? 100 + a.bestSignal.expectedValue * 100 : topA;
+    const evB = b.bestSignal?.isValue ? 100 + b.bestSignal.expectedValue * 100 : topB;
     if (evA !== evB) return evB - evA;
     return a.kickoffIso.localeCompare(b.kickoffIso);
   });
@@ -191,12 +316,13 @@ export function buildModelState(params: {
   backtests.sort((a, b) => a.modelBrier - b.modelBrier);
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     lastSyncIso: now.toISOString(),
     lastSyncEpoch: now.getTime(),
     isSeedData: params.isSeedData,
     totalHistoricalMatches: params.historicalMatches.length,
     ratings,
+    teamProfiles,
     dixonColes,
     fixtures,
     backtests,
@@ -204,9 +330,6 @@ export function buildModelState(params: {
   };
 }
 
-/**
- * Builds the initial offline seed model state immediately with zero network requests.
- */
 export function buildInitialSeedState(
   settings: UserSettings = DEFAULT_USER_SETTINGS,
   now: Date = new Date()
@@ -257,19 +380,13 @@ async function fetchTextWithTimeout(
       signal: controller.signal,
       headers: { Accept: 'text/csv, application/json, text/plain, */*' },
     });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.text();
   } finally {
     clearTimeout(timer);
   }
 }
 
-/**
- * Executes a full on-device weekly sync directly against all free keyless public feeds,
- * refits all statistical models locally, and falls back gracefully if any feed is unreachable.
- */
 export async function runOnDeviceWeeklySync(
   settings: UserSettings,
   onProgress?: (completed: number, total: number, currentLabel: string) => void,
@@ -280,7 +397,6 @@ export async function runOnDeviceWeeklySync(
     settings.enabledSports.includes(f.sport)
   );
 
-  // Start with seed history as baseline so partially offline syncs never leave a sport blank
   const seedMatches = buildSeedHistoricalMatches(now);
   const fetchedMatches: HistoricalMatch[] = [];
   const leaguesWithLiveHistory = new Set<string>();
@@ -368,7 +484,7 @@ export async function runOnDeviceWeeklySync(
                       home: ev.oddsHome,
                       draw: ev.oddsDraw,
                       away: ev.oddsAway,
-                      source: 'ESPN Public Feed',
+                      source: 'Live Public Feed',
                     }
                   : undefined,
             });
@@ -396,26 +512,22 @@ export async function runOnDeviceWeeklySync(
         status: 'failed',
         recordsParsed: 0,
         lastAttemptIso: now.toISOString(),
-        errorMessage: err instanceof Error ? err.message : 'Network unavailable',
+        errorMessage: err instanceof Error ? err.message : 'Offline',
       });
     }
   }
 
-  onProgress?.(activeFeeds.length, activeFeeds.length, 'Fitting models locally...');
+  onProgress?.(activeFeeds.length, activeFeeds.length, 'Updating predictions locally...');
 
-  // Combine live historical matches with seed fallback for any league that failed to fetch
   const mergedHistory: HistoricalMatch[] = [
     ...fetchedMatches,
     ...seedMatches.filter((m) => !leaguesWithLiveHistory.has(m.leagueId)),
   ];
 
-  // Use live upcoming fixtures if available; otherwise keep seed slate so UI is never empty
   const upcomingToUse =
     liveUpcoming.length > 0
       ? liveUpcoming
-      : SEED_UPCOMING_FIXTURES.filter((s) =>
-          settings.enabledSports.includes(s.sport)
-        ).map((s) => ({
+      : SEED_UPCOMING_FIXTURES.filter((s) => settings.enabledSports.includes(s.sport)).map((s) => ({
           id: s.id,
           sport: s.sport,
           leagueId: s.leagueId,

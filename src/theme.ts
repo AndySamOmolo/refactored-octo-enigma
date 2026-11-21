@@ -1,21 +1,35 @@
 import { Platform } from 'react-native';
 
-export const COLORS = {
-  bg: '#0B0F17',
-  surface: '#111827',
-  surfaceRaised: '#1A2234',
-  border: '#243047',
-  borderActive: '#3B82F6',
+export const THEME = {
+  background: '#0A0E17',
+  surface: '#131A29',
+  elevated: '#1C2538',
+  border: '#26334D',
+  primary: '#3B82F6',
+  win: '#10B981',
+  draw: '#F59E0B',
+  loss: '#EF4444',
   text: '#F8FAFC',
   textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
-  accent: '#3B82F6',
+} as const;
+
+export const COLORS = {
+  bg: THEME.background,
+  surface: THEME.surface,
+  surfaceRaised: THEME.elevated,
+  border: THEME.border,
+  borderActive: THEME.primary,
+  text: THEME.text,
+  textSecondary: THEME.textSecondary,
+  textMuted: THEME.textMuted,
+  accent: THEME.primary,
   accentDim: 'rgba(59, 130, 246, 0.14)',
-  emerald: '#10B981',
+  emerald: THEME.win,
   emeraldDim: 'rgba(16, 185, 129, 0.14)',
-  amber: '#F59E0B',
+  amber: THEME.draw,
   amberDim: 'rgba(245, 158, 11, 0.14)',
-  crimson: '#EF4444',
+  crimson: THEME.loss,
   crimsonDim: 'rgba(239, 68, 68, 0.14)',
   cyan: '#06B6D4',
 };
@@ -42,8 +56,8 @@ export const SPACING = {
 };
 
 export const RADIUS = {
-  sm: 6,
-  md: 10,
-  lg: 14,
+  sm: 8,
+  md: 12,
+  lg: 16,
   pill: 999,
 };
