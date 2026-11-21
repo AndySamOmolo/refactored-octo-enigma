@@ -399,7 +399,13 @@ object PlayerPropsEngine {
         }
 
         val homeBump = if (isHome && !spec.inverseOpponentEffect) 1.03 else 1.0
-        val adjustedMean = max(0.08, spec.baseMean * scoreFactor * powerFactor * homeBump)
+        val rawAdjusted = max(0.08, spec.baseMean * scoreFactor * powerFactor * homeBump)
+        // Enforce team xG conservation: no single football player can exceed 40% of team projected goals
+        val adjustedMean = if (sport == Sport.FOOTBALL && spec.marketLabel.contains("Goal", ignoreCase = true)) {
+            min(rawAdjusted, max(0.08, teamProjScore * 0.40))
+        } else {
+            rawAdjusted
+        }
 
         val overProb: Double
         val rangeLow: Double
@@ -411,8 +417,8 @@ object PlayerPropsEngine {
                 val k = max(1, spec.threshold.roundToInt())
                 overProb = poissonAtLeast(adjustedMean, k).coerceIn(0.05, 0.94)
                 val sd = sqrt(adjustedMean)
-                rangeLow = round1(max(0.0, adjustedMean - Z_80 * sd))
-                rangeHigh = round1(adjustedMean + Z_80 * sd)
+                rangeLow = kotlin.math.floor(max(0.0, adjustedMean - 1.1 * sd))
+                rangeHigh = max(rangeLow + 1.0, kotlin.math.ceil(adjustedMean + Z_80 * sd))
                 lineLabel = buildPoissonLineLabel(spec, k)
             }
 
