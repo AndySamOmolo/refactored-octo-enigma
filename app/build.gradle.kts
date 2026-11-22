@@ -135,3 +135,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }
+
+// Prevent parallel KSP tasks (:kspDebugKotlin & :kspReleaseKotlin) from racing on Room's shared schema JSON
+tasks.matching { it.name == "kspReleaseKotlin" || it.name == "kspDebugUnitTestKotlin" }.configureEach {
+    mustRunAfter("kspDebugKotlin")
+}

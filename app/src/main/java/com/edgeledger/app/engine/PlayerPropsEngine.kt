@@ -104,7 +104,7 @@ object PlayerPropsEngine {
         val out = mutableListOf<PlayerPropPrediction>()
         ranked.forEachIndexed { idx, p ->
             val playerXg = (topSharePool * (rawWeights[idx] / weightSum)).coerceIn(0.08, teamXg * 0.45)
-            val anytimePct = (StatsMath.poissonOverProb(playerXg, 0) * 100.0).roundToInt().coerceIn(5, 85)
+            val anytimePct = (StatsMath.poissonOverProb(playerXg, 0.5) * 100.0).roundToInt().coerceIn(5, 85)
             val low = StatsMath.poissonQuantile(playerXg, 0.15).toDouble()
             val high = max(low + 1.0, StatsMath.poissonQuantile(playerXg, 0.85).toDouble())
             out.add(
@@ -132,7 +132,7 @@ object PlayerPropsEngine {
             if (idx == 0) {
                 val sotMean = (playerXg * 2.6 + 0.35).coerceIn(0.4, 3.8)
                 val line = centeredHalfLine(sotMean)
-                val sotOver = (StatsMath.poissonOverProb(sotMean, floor(line).toInt()) * 100.0).roundToInt().coerceIn(5, 92)
+                val sotOver = (StatsMath.poissonOverProb(sotMean, line) * 100.0).roundToInt().coerceIn(5, 92)
                 out.add(
                     PlayerPropPrediction(
                         id = "${fxPrefix}_${sideTag}_fb_sot_$idx",
@@ -156,7 +156,7 @@ object PlayerPropsEngine {
             }
             if (idx == 1) {
                 val assistMean = min(playerXg * 0.72, teamXg * 0.28).coerceIn(0.06, min(0.85, teamXg * 0.65))
-                val assistPct = (StatsMath.poissonOverProb(assistMean, 0) * 100.0).roundToInt().coerceIn(5, 65)
+                val assistPct = (StatsMath.poissonOverProb(assistMean, 0.5) * 100.0).roundToInt().coerceIn(5, 65)
                 out.add(
                     PlayerPropPrediction(
                         id = "${fxPrefix}_${sideTag}_fb_ast_$idx",
@@ -343,7 +343,7 @@ object PlayerPropsEngine {
         return forwards.mapIndexed { idx, p ->
             val sogMean = ((2.95 - idx * 0.45) * (teamGoals / 3.0).coerceIn(0.8, 1.3)).coerceIn(1.2, 4.8)
             val line = centeredHalfLine(sogMean)
-            val overPct = (StatsMath.poissonOverProb(sogMean, floor(line).toInt()) * 100.0).roundToInt().coerceIn(5, 92)
+            val overPct = (StatsMath.poissonOverProb(sogMean, line) * 100.0).roundToInt().coerceIn(5, 92)
             PlayerPropPrediction(
                 id = "${fxPrefix}_${sideTag}_nhl_sog_$idx",
                 playerName = p.name,
@@ -372,7 +372,7 @@ object PlayerPropsEngine {
         return hitters.mapIndexed { idx, p ->
             val tbMean = ((1.45 - idx * 0.15) * (teamRuns / 4.3).coerceIn(0.75, 1.35)).coerceIn(0.7, 2.8)
             val line = centeredHalfLine(tbMean)
-            val overPct = (StatsMath.poissonOverProb(tbMean, floor(line).toInt()) * 100.0).roundToInt().coerceIn(5, 90)
+            val overPct = (StatsMath.poissonOverProb(tbMean, line) * 100.0).roundToInt().coerceIn(5, 90)
             PlayerPropPrediction(
                 id = "${fxPrefix}_${sideTag}_mlb_tb_$idx",
                 playerName = p.name,

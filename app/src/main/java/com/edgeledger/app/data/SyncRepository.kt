@@ -204,12 +204,14 @@ class SyncRepository(
             val top = fx.markets.topPicks.firstOrNull() ?: return@mapNotNull null
             val kickoffMs = runCatching { Instant.parse(fx.kickoffIso).toEpochMilli() }.getOrNull()
             if (kickoffMs != null && kickoffMs <= nowMs) return@mapNotNull null
+            val matchup = "${fx.homeTeam} vs ${fx.awayTeam}"
             val hash = OddsMath.buildLockedPickHash(
                 fixtureId = fx.id,
+                matchup = matchup,
                 pickLabel = top.label,
                 chancePct = top.chancePct,
                 modelVersion = fx.markets.modelVersion,
-                kickoffIso = fx.kickoffIso,
+                lockedAtIso = nowIso,
             )
             LockedPickEntity(
                 fixtureId = fx.id,

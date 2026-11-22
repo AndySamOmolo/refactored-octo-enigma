@@ -52,9 +52,9 @@ class EdgeLedgerEngineTest {
 
     @Test
     fun statsMathExactPoissonNormalAndBinomialAreAccurate() {
-        val p12 = StatsMath.poissonPmf(10.5, 12)
+        val p12 = StatsMath.poissonPmf(12, 10.5)
         assertTrue(p12 in 0.05..0.15)
-        val over9 = StatsMath.poissonOverProb(10.5, 9)
+        val over9 = StatsMath.poissonOverProb(10.5, 9.5)
         assertTrue(over9 in 0.50..0.70)
 
         val q15 = StatsMath.poissonQuantile(2.5, 0.15)
