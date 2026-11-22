@@ -472,11 +472,7 @@ class EdgeLedgerEngineTest {
         assertTrue(kalshiParsed[0].first.contains("Chiefs"))
 
         // Polymarket /events nested markets[] with team-vs-team outcomes
-        val polyJson = """
-            [{"title":"Arsenal vs Chelsea","markets":[
-                {"question":"Arsenal vs Chelsea","closed":false,"outcomes":"["Arsenal","Chelsea"]","outcomePrices":"["0.58","0.42"]"}
-            ]}]
-        """.trimIndent()
+        val polyJson = "[{\"title\":\"Arsenal vs Chelsea\",\"markets\":[{\"question\":\"Arsenal vs Chelsea\",\"closed\":false,\"outcomes\":\"[\\\"Arsenal\\\",\\\"Chelsea\\\"]\",\"outcomePrices\":\"[\\\"0.58\\\",\\\"0.42\\\"]\"}]}]"
         val polyParsed = client.parsePolymarketEventsPayload(polyJson)
         assertEquals(1, polyParsed.size)
         assertTrue(polyParsed[0].first.contains("Arsenal"))

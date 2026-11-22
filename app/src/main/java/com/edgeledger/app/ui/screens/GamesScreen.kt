@@ -28,7 +28,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.FilterList
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Sort
+import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.SportsSoccer
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -346,7 +346,7 @@ fun GamesScreen(
                 modifier = Modifier.weight(1f),
             )
             MenuTriggerChip(
-                icon = Icons.Rounded.Sort,
+                icon = Icons.AutoMirrored.Rounded.Sort,
                 label = sortMode.shortLabel,
                 active = sortMode != GameSortMode.BEST_PICK,
                 onClick = { showSortSheet = true },
