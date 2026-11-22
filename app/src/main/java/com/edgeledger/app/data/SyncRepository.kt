@@ -576,7 +576,7 @@ class SyncRepository(
                 val action: (String) -> Int,
             )
 
-            val espnDates = "${today.format(DateTimeFormatter.BASIC_ISO_DATE)}-${today.plusDays(6).format(DateTimeFormatter.BASIC_ISO_DATE)}"
+            val todayCompact = today.format(DateTimeFormatter.BASIC_ISO_DATE)
             val feeds = listOf(
                 // Football-Data.co.uk (Top 5 + EFL Championship)
                 FeedSpec("fd-e0", "Football-Data.co.uk (Premier League)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/E0.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/E0.csv") { raw ->
@@ -598,43 +598,43 @@ class SyncRepository(
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "F1"); liveHistory.addAll(list); list.size
                 },
                 // ClubElo (HTTP-only official API; avoid TLS failure latency)
-                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "http://api.clubelo.com/$today", "http://api.clubelo.com/${today.minusDays(1)}") { raw ->
+                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "http://api.clubelo.com/${today.minusDays(1)}", "http://api.clubelo.com/${today.minusDays(2)}") { raw ->
                     val map = CsvAndFeedParsers.parseClubEloCsv(raw); clubElo.putAll(map); map.size
                 },
                 // ESPN Soccer Scoreboards (7-day rolling window across 9 top competitions)
-                FeedSpec("espn-epl", "ESPN Premier League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-epl", "ESPN Premier League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "E0", "Premier League")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-championship", "ESPN Championship", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-championship", "ESPN Championship", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "E1", "Championship")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-laliga", "ESPN La Liga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-laliga", "ESPN La Liga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "SP1", "La Liga")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-bundesliga", "ESPN Bundesliga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-bundesliga", "ESPN Bundesliga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "D1", "Bundesliga")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-seriea", "ESPN Serie A", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-seriea", "ESPN Serie A", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "I1", "Serie A")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-ligue1", "ESPN Ligue 1", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-ligue1", "ESPN Ligue 1", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "F1", "Ligue 1")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-ucl", "ESPN UEFA Champions League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-ucl", "ESPN UEFA Champions League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "UCL", "Champions League")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-uel", "ESPN UEFA Europa League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-uel", "ESPN UEFA Europa League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "UEL", "Europa League")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-mls", "ESPN MLS", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-mls", "ESPN MLS", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "MLS", "MLS")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
@@ -642,7 +642,7 @@ class SyncRepository(
                 FeedSpec("nflverse", "nflverse NFL Games CSV", Sport.NFL, "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv") { raw ->
                     val list = CsvAndFeedParsers.parseNflverseGamesCsv(raw, today.year - 1); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("espn-nfl", "ESPN NFL Scoreboard", Sport.NFL, "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-nfl", "ESPN NFL Scoreboard", Sport.NFL, "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NFL, "NFL", "NFL")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
@@ -650,7 +650,7 @@ class SyncRepository(
                     val map = CsvAndFeedParsers.parseEspnNflStandings(raw); liveStandingsProfiles.putAll(map); map.size
                 },
                 // NBA (ESPN 7-day Scoreboard + Standings)
-                FeedSpec("espn-nba", "ESPN NBA Scoreboard", Sport.NBA, "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-nba", "ESPN NBA Scoreboard", Sport.NBA, "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NBA, "NBA", "NBA")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
@@ -677,12 +677,12 @@ class SyncRepository(
                 FeedSpec("tml-atp", "TennisMyLife ATP CSV", Sport.TENNIS, "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/${today.year}.csv", "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/${today.year - 1}.csv") { raw ->
                     val list = CsvAndFeedParsers.parseTmlTennisCsv(raw); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("espn-tennis", "ESPN Tennis Tour", Sport.TENNIS, "https://site.api.espn.com/apis/site/v2/sports/tennis/all/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-tennis", "ESPN Tennis Tour", Sport.TENNIS, "https://site.api.espn.com/apis/site/v2/sports/tennis/all/scoreboard?dates=$todayCompact") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnTennisScoreboard(raw)
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
                 // MMA / UFC (ESPN UFC Scoreboard)
-                FeedSpec("espn-mma", "ESPN UFC / MMA", Sport.MMA, "https://site.web.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=$espnDates") { raw ->
+                FeedSpec("espn-mma", "ESPN UFC / MMA", Sport.MMA, "https://site.web.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.MMA, "UFC", "UFC")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
@@ -694,10 +694,7 @@ class SyncRepository(
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.F1, "F1", "Formula 1")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                // Cricket (Keyless ESPNcricinfo consumer feed)
-                FeedSpec("espncricinfo", "ESPNcricinfo Live Cricket", Sport.CRICKET, "https://hs-consumer-api.espncricinfo.com/v1/pages/matches/current?lang=en&latest=true") { raw ->
-                    val u = CsvAndFeedParsers.parseEspnCricinfoCurrent(raw); liveUpcoming.addAll(u); u.size
-                },
+
             )
 
             _syncStatusText.value = "Syncing live public datasets..."

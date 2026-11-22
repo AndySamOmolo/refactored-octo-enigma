@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.QueryStats
@@ -51,7 +50,6 @@ import androidx.navigation.navArgument
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.theme.EdgeLedgerTheme
 import com.edgeledger.app.ui.screens.AccuracyScreen
-import com.edgeledger.app.ui.screens.CompareScreen
 import com.edgeledger.app.ui.screens.GamesScreen
 import com.edgeledger.app.ui.screens.MatchDetailScreen
 import com.edgeledger.app.ui.screens.PicksScreen
@@ -90,7 +88,6 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
     val tabs = remember {
         listOf(
             BottomTab("games", "Games", Icons.Outlined.EmojiEvents),
-            BottomTab("compare", "Compare", Icons.AutoMirrored.Outlined.CompareArrows),
             BottomTab("accuracy", "Accuracy", Icons.Outlined.QueryStats),
             BottomTab("picks", "Picks", Icons.Outlined.BookmarkBorder),
             BottomTab("settings", "Settings", Icons.Outlined.Settings),
@@ -199,7 +196,6 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
                         },
                     )
                 }
-                composable("compare") { CompareScreen(app = app) }
                 composable("accuracy") { AccuracyScreen(app = app) }
                 composable("picks") { PicksScreen(app = app) }
                 composable("settings") { SettingsScreen(app = app) }

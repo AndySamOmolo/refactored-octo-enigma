@@ -508,17 +508,35 @@ class OptionalOddsAndDataClient(
 
     suspend fun fetchPolymarketOdds(): List<Pair<String, Double>> {
         return try {
-            // Verified late-2026 Gamma API: /events with sports tag_id=100639 (each event embeds child markets[])
-            val primaryUrl =
-                "https://gamma-api.polymarket.com/events?tag_id=100639&active=true&closed=false&order=volume24hr&ascending=false&limit=50"
-            val fallbackUrl =
-                "https://gamma-api.polymarket.com/events?tag_slug=sports&active=true&closed=false&order=volume24hr&ascending=false&limit=50"
-            val primary = fetchPolymarketEventsUrl("polymarket:events_sports_id", primaryUrl)
-            val resolved = if (primary.isNotEmpty()) {
-                primary
-            } else {
-                fetchPolymarketEventsUrl("polymarket:events_sports_slug", fallbackUrl)
-            }.distinctBy { it.first.lowercase(Locale.US) }
+            // Gamma API caveat (2026): combining tag_id + order=volume24hr often returns an empty page.
+            // Fetch sports tag_id=100639 & NBA tag_id=745 WITHOUT order=, plus top-100 active events post-filtered for sports.
+            val combined = mutableListOf<Pair<String, Double>>()
+            combined.addAll(
+                fetchPolymarketEventsUrl(
+                    "polymarket:events_sports_100639",
+                    "https://gamma-api.polymarket.com/events?tag_id=100639&active=true&closed=false&limit=50",
+                    requireSportsFilter = false,
+                )
+            )
+            if (combined.size < 15) {
+                combined.addAll(
+                    fetchPolymarketEventsUrl(
+                        "polymarket:events_nba_745",
+                        "https://gamma-api.polymarket.com/events?tag_id=745&active=true&closed=false&limit=30",
+                        requireSportsFilter = false,
+                    )
+                )
+            }
+            if (combined.size < 15) {
+                combined.addAll(
+                    fetchPolymarketEventsUrl(
+                        "polymarket:events_top_active",
+                        "https://gamma-api.polymarket.com/events?active=true&closed=false&order=volume24hr&ascending=false&limit=100",
+                        requireSportsFilter = true,
+                    )
+                )
+            }
+            val resolved = combined.distinctBy { it.first.lowercase(Locale.US) }
             setStatus(PROVIDER_POLYMARKET, if (resolved.isNotEmpty()) "OK (${resolved.size} sports markets)" else "No active sports markets")
             resolved
         } catch (ce: CancellationException) {
@@ -532,7 +550,7 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    private suspend fun fetchPolymarketEventsUrl(cacheKey: String, url: String): List<Pair<String, Double>> {
+    private suspend fun fetchPolymarketEventsUrl(cacheKey: String, url: String, requireSportsFilter: Boolean = false): List<Pair<String, Double>> {
         val requestBuilder = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
@@ -548,10 +566,10 @@ class OptionalOddsAndDataClient(
         )
         val body = cachedRes.body.orEmpty()
         if (body.isBlank()) return emptyList()
-        return parsePolymarketEventsPayload(body)
+        return parsePolymarketEventsPayload(body, requireSportsFilter)
     }
 
-    internal fun parsePolymarketEventsPayload(body: String): List<Pair<String, Double>> {
+    internal fun parsePolymarketEventsPayload(body: String, requireSportsFilter: Boolean = false): List<Pair<String, Double>> {
         val root = runCatching { json.parseToJsonElement(body) as? JsonArray }.getOrNull() ?: return emptyList()
         val pairs = mutableListOf<Pair<String, Double>>()
         for (elem in root) {
@@ -569,6 +587,7 @@ class OptionalOddsAndDataClient(
                 val question = marketObj.stringOrNull("question")?.trim().takeIf { !it.isNullOrBlank() }
                     ?: eventTitle
                 if (question.isBlank() || isBlockedNonSportsMarket(question)) continue
+                if (requireSportsFilter && !isSportsMarketQuestion(question, eventTitle)) continue
                 val outcomes = parseStringOrJsonArray(marketObj["outcomes"])
                 val yesProb = extractPolymarketYesProbability(marketObj) ?: continue
                 if (!yesProb.isFinite() || yesProb !in 0.01..0.99) continue
