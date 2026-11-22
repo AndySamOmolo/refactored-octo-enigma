@@ -2,8 +2,10 @@ package com.edgeledger.app.data
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
@@ -28,6 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -36,6 +39,8 @@ import kotlinx.serialization.builtins.SetSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import java.security.GeneralSecurityException
+import java.security.InvalidKeyException
 import java.security.KeyStore
 import java.util.UUID
 import javax.crypto.Cipher
@@ -50,7 +55,7 @@ private val Context.dataStore by preferencesDataStore(
 
 /**
  * Hardware-backed Android Keystore AES-256-GCM cipher for encrypting [UserApiKeys] at rest.
- * Falls back cleanly to null if Keystore is unavailable (e.g., robolectric/unit test environments).
+ * Automatically regenerates the alias once if permanently invalidated (e.g., lockscreen/biometric reset).
  */
 private object KeystoreAesGcm {
     private const val ANDROID_KEYSTORE = "AndroidKeyStore"
@@ -60,9 +65,14 @@ private object KeystoreAesGcm {
     private const val IV_BYTES = 12
     private const val PREFIX = "ENC_GCM_V1:"
 
-    private fun getOrCreateKey(): SecretKey {
+    private fun getOrCreateKey(forceRecreate: Boolean = false): SecretKey {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        if (forceRecreate && ks.containsAlias(KEY_ALIAS)) {
+            runCatching { ks.deleteEntry(KEY_ALIAS) }
+        }
+        if (!forceRecreate) {
+            (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        }
         val keyGen = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         val spec = KeyGenParameterSpec.Builder(
             KEY_ALIAS,
@@ -77,14 +87,25 @@ private object KeystoreAesGcm {
     }
 
     fun encrypt(plaintext: String): String {
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        val iv = cipher.iv
-        val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
-        val combined = ByteArray(iv.size + ciphertext.size)
-        System.arraycopy(iv, 0, combined, 0, iv.size)
-        System.arraycopy(ciphertext, 0, combined, iv.size, ciphertext.size)
-        return PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
+        fun doEncrypt(key: SecretKey): String {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val iv = cipher.iv
+            val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+            val combined = ByteArray(iv.size + ciphertext.size)
+            System.arraycopy(iv, 0, combined, 0, iv.size)
+            System.arraycopy(ciphertext, 0, combined, iv.size, ciphertext.size)
+            return PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
+        }
+        return try {
+            doEncrypt(getOrCreateKey(forceRecreate = false))
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            Log.w("KeystoreAesGcm", "Key invalidated; regenerating alias", e)
+            doEncrypt(getOrCreateKey(forceRecreate = true))
+        } catch (e: InvalidKeyException) {
+            Log.w("KeystoreAesGcm", "Invalid key; regenerating alias", e)
+            doEncrypt(getOrCreateKey(forceRecreate = true))
+        }
     }
 
     fun decrypt(stored: String): String? {
@@ -133,7 +154,13 @@ data class AppUserPrefs(
 
 class ThemeAndPrefsRepository(context: Context) {
     private val appContext: Context = context.applicationContext
-    private val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+    private val _persistenceError = MutableStateFlow<String?>(null)
+    val persistenceError: StateFlow<String?> = _persistenceError.asStateFlow()
+
+    private val exceptionHandler = CoroutineExceptionHandler { _, err ->
+        Log.e("ThemeAndPrefsRepo", "Persistence error", err)
+        _persistenceError.value = "Settings persistence error: ${err.message?.take(80) ?: err::class.simpleName}"
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     private val writeMutex = Mutex()
     private val undoLock = Any()
@@ -195,7 +222,6 @@ class ThemeAndPrefsRepository(context: Context) {
                 val p = appContext.dataStore.data.first()
                 p[KEY_THEME]?.let { ThemeCodec.decodeOrNull(it) }?.let { _theme.value = it }
 
-                // Decode each saved theme individually via ThemeCodec so one corrupt entry never wipes all
                 p[KEY_SAVED_THEMES]?.let { raw ->
                     runCatching {
                         val arr = json.parseToJsonElement(raw) as? JsonArray
@@ -203,10 +229,11 @@ class ThemeAndPrefsRepository(context: Context) {
                     }.onSuccess { _savedThemes.value = it }
                 }
 
-                // Decrypt Keystore AES-256-GCM API keys (with one-time migration from legacy plaintext)
                 p[KEY_API_KEYS]?.let { raw ->
                     val decrypted = if (KeystoreAesGcm.isEncrypted(raw)) {
-                        runCatching { KeystoreAesGcm.decrypt(raw) }.getOrNull()
+                        runCatching { KeystoreAesGcm.decrypt(raw) }
+                            .onFailure { Log.e("ThemeAndPrefsRepo", "Keystore decrypt failed", it) }
+                            .getOrNull()
                     } else {
                         raw
                     }
@@ -215,8 +242,7 @@ class ThemeAndPrefsRepository(context: Context) {
                             .onSuccess { keys ->
                                 _apiKeys.value = keys
                                 if (!KeystoreAesGcm.isEncrypted(raw)) {
-                                    // Migrate legacy plaintext keys into Keystore AES-256-GCM immediately
-                                    persistApiKeysLocked(keys)
+                                    persistLatestApiKeysLocked()
                                 }
                             }
                     }
@@ -244,17 +270,20 @@ class ThemeAndPrefsRepository(context: Context) {
                     quietHoursEnd = p[KEY_QUIET_END] ?: 7,
                     pinnedTeams = pinned,
                 ).sanitized()
-            } catch (_: Exception) {
-                // Keep safe defaults; never freeze splash screen
+            } catch (e: Exception) {
+                Log.e("ThemeAndPrefsRepo", "Initial hydration error", e)
             } finally {
                 _loaded.value = true
             }
         }
     }
 
-    /** Suspends until initial DataStore hydration has completed. */
     suspend fun awaitLoaded() {
         loaded.first { it }
+    }
+
+    fun clearPersistenceError() {
+        _persistenceError.value = null
     }
 
     private fun refreshUndoFlagsLocked() {
@@ -263,7 +292,7 @@ class ThemeAndPrefsRepository(context: Context) {
     }
 
     fun updateTheme(transform: (ThemeConfigV1) -> ThemeConfigV1) {
-        val next = synchronized(undoLock) {
+        synchronized(undoLock) {
             val current = _theme.value
             val candidate = transform(current).sanitized()
             if (candidate == current) return
@@ -272,65 +301,63 @@ class ThemeAndPrefsRepository(context: Context) {
             redoStack.clear()
             refreshUndoFlagsLocked()
             _theme.value = candidate
-            candidate
         }
-        persistTheme(next)
+        persistLatestTheme()
     }
 
     fun undoTheme() {
-        val prev = synchronized(undoLock) {
+        synchronized(undoLock) {
             if (undoStack.isEmpty()) return
             val p = undoStack.removeLast()
             redoStack.addLast(_theme.value)
             refreshUndoFlagsLocked()
             _theme.value = p
-            p
         }
-        persistTheme(prev)
+        persistLatestTheme()
     }
 
     fun redoTheme() {
-        val next = synchronized(undoLock) {
+        synchronized(undoLock) {
             if (redoStack.isEmpty()) return
             val n = redoStack.removeLast()
             undoStack.addLast(_theme.value)
             refreshUndoFlagsLocked()
             _theme.value = n
-            n
         }
-        persistTheme(next)
+        persistLatestTheme()
     }
 
     fun resetTheme() {
         updateTheme { ThemePresets.default }
     }
 
-    fun saveCustomTheme(customName: String) {
+    fun saveCustomTheme(customName: String): Boolean {
+        val wasAtCap = _savedThemes.value.size >= 16
         val cleanName = customName.trim().ifBlank { "My Custom Theme ${_savedThemes.value.size + 1}" }
         val custom = _theme.value.copy(
             id = "custom-${UUID.randomUUID()}",
             name = cleanName,
         ).sanitized()
-        val updated = (listOf(custom) + _savedThemes.value).take(16)
-        _savedThemes.value = updated
-        persistSavedThemes(updated)
+        _savedThemes.updateAndGet { cur -> (listOf(custom) + cur).take(16) }
+        persistLatestSavedThemes()
+        return !wasAtCap
     }
 
     fun duplicateCustomTheme(id: String) {
-        val src = _savedThemes.value.firstOrNull { it.id == id } ?: return
-        val copy = src.copy(
-            id = "custom-${UUID.randomUUID()}",
-            name = "${src.name} Copy",
-        ).sanitized()
-        val updated = (listOf(copy) + _savedThemes.value).take(16)
-        _savedThemes.value = updated
-        persistSavedThemes(updated)
+        _savedThemes.updateAndGet { cur ->
+            val src = cur.firstOrNull { it.id == id } ?: return@updateAndGet cur
+            val copy = src.copy(
+                id = "custom-${UUID.randomUUID()}",
+                name = "${src.name} Copy",
+            ).sanitized()
+            (listOf(copy) + cur).take(16)
+        }
+        persistLatestSavedThemes()
     }
 
     fun deleteCustomTheme(id: String) {
-        val updated = _savedThemes.value.filterNot { it.id == id }
-        _savedThemes.value = updated
-        persistSavedThemes(updated)
+        _savedThemes.updateAndGet { cur -> cur.filterNot { it.id == id } }
+        persistLatestSavedThemes()
     }
 
     fun importThemeJson(raw: String): Boolean {
@@ -342,41 +369,50 @@ class ThemeAndPrefsRepository(context: Context) {
 
     fun exportThemeJson(): String = ThemeCodec.encode(_theme.value)
 
-    private fun persistTheme(config: ThemeConfigV1) {
+    private fun persistLatestTheme() {
         scope.launch {
             awaitLoaded()
             writeMutex.withLock {
-                appContext.dataStore.edit { it[KEY_THEME] = ThemeCodec.encode(config) }
+                val latest = _theme.value
+                appContext.dataStore.edit { it[KEY_THEME] = ThemeCodec.encode(latest) }
             }
         }
     }
 
-    private fun persistSavedThemes(list: List<ThemeConfigV1>) {
+    private fun persistLatestSavedThemes() {
         scope.launch {
             awaitLoaded()
             writeMutex.withLock {
-                val encoded = json.encodeToString(ListSerializer(ThemeConfigV1.serializer()), list)
+                val latest = _savedThemes.value
+                val encoded = json.encodeToString(ListSerializer(ThemeConfigV1.serializer()), latest)
                 appContext.dataStore.edit { it[KEY_SAVED_THEMES] = encoded }
             }
         }
     }
 
-    private suspend fun persistApiKeysLocked(keys: UserApiKeys) {
+    private suspend fun persistLatestApiKeysLocked() {
         writeMutex.withLock {
-            val encodedJson = json.encodeToString(UserApiKeys.serializer(), keys)
-            val encrypted = KeystoreAesGcm.encrypt(encodedJson)
-            appContext.dataStore.edit { it[KEY_API_KEYS] = encrypted }
+            val latest = _apiKeys.value
+            val encodedJson = json.encodeToString(UserApiKeys.serializer(), latest)
+            try {
+                val encrypted = KeystoreAesGcm.encrypt(encodedJson)
+                appContext.dataStore.edit { it[KEY_API_KEYS] = encrypted }
+                _persistenceError.value = null
+            } catch (e: GeneralSecurityException) {
+                Log.e("ThemeAndPrefsRepo", "Keystore encryption failed", e)
+                _persistenceError.value = "Could not encrypt API keys via Android Keystore. Please retry."
+            } catch (e: Exception) {
+                Log.e("ThemeAndPrefsRepo", "API key save failed", e)
+                _persistenceError.value = "Could not save API keys: ${e.message?.take(64) ?: "Unknown error"}"
+            }
         }
     }
 
     fun updateApiKeys(transform: (UserApiKeys) -> UserApiKeys) {
-        var nextKeys = UserApiKeys()
-        _apiKeys.update { current ->
-            transform(current).also { nextKeys = it }
-        }
+        _apiKeys.update { current -> transform(current) }
         scope.launch {
             awaitLoaded()
-            persistApiKeysLocked(nextKeys)
+            persistLatestApiKeysLocked()
         }
     }
 
@@ -390,39 +426,46 @@ class ThemeAndPrefsRepository(context: Context) {
     }
 
     fun updatePrefs(transform: (AppUserPrefs) -> AppUserPrefs) {
-        var nextPrefs = AppUserPrefs()
-        _prefs.update { current ->
-            transform(current).sanitized().also { nextPrefs = it }
+        var prevAuto = _prefs.value.autoSyncWeekly
+        var prevWifi = _prefs.value.wifiOnlySync
+        val next = _prefs.updateAndGet { current ->
+            prevAuto = current.autoSyncWeekly
+            prevWifi = current.wifiOnlySync
+            transform(current).sanitized()
         }
+        val scheduleChanged = prevAuto != next.autoSyncWeekly || prevWifi != next.wifiOnlySync
         scope.launch {
             awaitLoaded()
             writeMutex.withLock {
-                val pinnedJson = json.encodeToString(SetSerializer(String.serializer()), nextPrefs.pinnedTeams)
+                val latest = _prefs.value
+                val pinnedJson = json.encodeToString(SetSerializer(String.serializer()), latest.pinnedTeams)
                 appContext.dataStore.edit {
-                    it[KEY_BANKROLL] = nextPrefs.bankroll
-                    it[KEY_PAPER_BANKROLL] = nextPrefs.paperBankroll
-                    it[KEY_IS_PAPER] = nextPrefs.isPaperTrading
-                    it[KEY_STAKING_MODE] = nextPrefs.stakingMode.name
-                    it[KEY_RISK] = nextPrefs.riskStyle.name
-                    it[KEY_ODDS_FMT] = nextPrefs.oddsFormat.name
-                    it[KEY_DEVIG] = nextPrefs.devigMethod.name
-                    it[KEY_MIN_EV] = nextPrefs.minEvPct
-                    it[KEY_MIN_PROB] = nextPrefs.minProbFloorPct
-                    it[KEY_AUTO_SYNC] = nextPrefs.autoSyncWeekly
-                    it[KEY_WIFI_ONLY] = nextPrefs.wifiOnlySync
-                    it[KEY_BLEND] = nextPrefs.marketBlendWeight
-                    it[KEY_ALERTS] = nextPrefs.alertsEnabled
-                    it[KEY_QUIET_START] = nextPrefs.quietHoursStart
-                    it[KEY_QUIET_END] = nextPrefs.quietHoursEnd
+                    it[KEY_BANKROLL] = latest.bankroll
+                    it[KEY_PAPER_BANKROLL] = latest.paperBankroll
+                    it[KEY_IS_PAPER] = latest.isPaperTrading
+                    it[KEY_STAKING_MODE] = latest.stakingMode.name
+                    it[KEY_RISK] = latest.riskStyle.name
+                    it[KEY_ODDS_FMT] = latest.oddsFormat.name
+                    it[KEY_DEVIG] = latest.devigMethod.name
+                    it[KEY_MIN_EV] = latest.minEvPct
+                    it[KEY_MIN_PROB] = latest.minProbFloorPct
+                    it[KEY_AUTO_SYNC] = latest.autoSyncWeekly
+                    it[KEY_WIFI_ONLY] = latest.wifiOnlySync
+                    it[KEY_BLEND] = latest.marketBlendWeight
+                    it[KEY_ALERTS] = latest.alertsEnabled
+                    it[KEY_QUIET_START] = latest.quietHoursStart
+                    it[KEY_QUIET_END] = latest.quietHoursEnd
                     it[KEY_PINNED] = pinnedJson
                 }
             }
-            // Keep WorkManager constraints synchronized with autoSyncWeekly / wifiOnlySync
-            WeeklySyncWorker.scheduleWeekly(
-                context = appContext,
-                enabled = nextPrefs.autoSyncWeekly,
-                wifiOnly = nextPrefs.wifiOnlySync,
-            )
+            if (scheduleChanged) {
+                val latest = _prefs.value
+                WeeklySyncWorker.scheduleWeekly(
+                    context = appContext,
+                    enabled = latest.autoSyncWeekly,
+                    wifiOnly = latest.wifiOnlySync,
+                )
+            }
         }
     }
 }

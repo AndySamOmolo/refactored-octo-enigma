@@ -53,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -110,6 +111,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     val apiKeys by app.prefsRepo.apiKeys.collectAsStateWithLifecycle()
     val quotas by app.syncRepo.providerQuotas.collectAsStateWithLifecycle()
     val syncing by app.syncRepo.syncing.collectAsStateWithLifecycle()
+    val persistErr by app.prefsRepo.persistenceError.collectAsStateWithLifecycle()
 
     var sectionTab by rememberSaveable { mutableIntStateOf(0) }
     var advancedMode by rememberSaveable { mutableStateOf(false) }
@@ -151,16 +153,17 @@ fun SettingsScreen(app: EdgeLedgerApp) {
 
     fun updateActiveRoleHex(newHex: String) {
         app.prefsRepo.updateTheme { t ->
+            val base = t.copy(id = "custom-theme", name = "Custom Theme")
             when (safeRoleIdx) {
-                0 -> t.copy(accentHex = newHex)
-                1 -> t.copy(winHex = newHex)
-                2 -> t.copy(drawHex = newHex)
-                3 -> t.copy(lossHex = newHex)
-                4 -> t.copy(pendingHex = newHex)
-                5 -> t.copy(oddsUpHex = newHex)
-                6 -> t.copy(oddsDownHex = newHex)
-                7 -> t.copy(valueHighlightHex = newHex)
-                else -> t.copy(sharpBadgeHex = newHex)
+                0 -> base.copy(accentHex = newHex)
+                1 -> base.copy(winHex = newHex)
+                2 -> base.copy(drawHex = newHex)
+                3 -> base.copy(lossHex = newHex)
+                4 -> base.copy(pendingHex = newHex)
+                5 -> base.copy(oddsUpHex = newHex)
+                6 -> base.copy(oddsDownHex = newHex)
+                7 -> base.copy(valueHighlightHex = newHex)
+                else -> base.copy(sharpBadgeHex = newHex)
             }
         }
     }
@@ -189,21 +192,29 @@ fun SettingsScreen(app: EdgeLedgerApp) {
         }
 
         item {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val sections = listOf("Theme Studio", "API Keys", "Model & Odds", "Alerts & Info")
-                items(sections.indices.toList(), key = { it }) { idx ->
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val sections = listOf("Theme", "APIs", "Model", "Alerts")
+                sections.forEachIndexed { idx, lbl ->
                     TokenPill(
-                        label = sections[idx],
+                        label = lbl,
                         selected = sectionTab == idx,
                         onClick = {
                             sectionTab = idx
                             if (idx == 1) app.syncRepo.refreshQuotaSummary()
                         },
+                        modifier = Modifier.weight(1f),
                     )
                 }
             }
         }
 
+        if (!persistErr.isNullOrBlank()) {
+            item {
+                Surface(color = c.lossDim, shape = tokens.shapes.medium, border = BorderStroke(1.dp, c.loss), modifier = Modifier.fillMaxWidth()) {
+                    Text(persistErr.orEmpty(), color = c.loss, fontWeight = FontWeight.Bold, fontSize = scaledSp(12f), modifier = Modifier.padding(10.dp))
+                }
+            }
+        }
         if (statusMsg != null) {
             item {
                 Surface(
@@ -375,7 +386,25 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         Text("Appearance & Color-Blind Modes", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(ThemeMode.entries, key = { it.name }) { m ->
-                                TokenPill(m.label, config.mode == m, { app.prefsRepo.updateTheme { it.copy(mode = m, batterySaverAutoAmoled = if (m == ThemeMode.LIGHT) false else it.batterySaverAutoAmoled) } })
+                                TokenPill(m.label, config.mode == m, {
+                                    app.prefsRepo.updateTheme { cur ->
+                                        val lightSurface = Color(0xFFFFFFFF)
+                                        val nextAccent = if (m == ThemeMode.LIGHT) autoFixContrastHex(cur.accentHex, lightSurface, 4.5f) else cur.accentHex
+                                        val nextWin = if (m == ThemeMode.LIGHT) autoFixContrastHex(cur.winHex, lightSurface, 4.5f) else cur.winHex
+                                        val nextDraw = if (m == ThemeMode.LIGHT) autoFixContrastHex(cur.drawHex, lightSurface, 4.5f) else cur.drawHex
+                                        val nextLoss = if (m == ThemeMode.LIGHT) autoFixContrastHex(cur.lossHex, lightSurface, 4.5f) else cur.lossHex
+                                        cur.copy(
+                                            id = "custom-theme",
+                                            name = "Custom Theme",
+                                            mode = m,
+                                            accentHex = nextAccent,
+                                            winHex = nextWin,
+                                            drawHex = nextDraw,
+                                            lossHex = nextLoss,
+                                            batterySaverAutoAmoled = if (m == ThemeMode.LIGHT) false else cur.batterySaverAutoAmoled,
+                                        )
+                                    }
+                                })
                             }
                         }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -447,7 +476,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                 modifier = Modifier.weight(1f),
                             )
                             Button(
-                                onClick = { updateActiveRoleHex(hexInput) },
+                                onClick = { if (Regex("^#?[0-9A-Fa-f]{6}$").matches(hexInput.trim())) { updateActiveRoleHex(hexInput.trim()) } else { statusMsg = "Enter a valid 6-digit hex color like #38BDF8." } },
                                 colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
                                 shape = tokens.shapes.button,
                             ) { Text("Apply", fontWeight = FontWeight.Bold) }
@@ -628,7 +657,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                     putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Theme (.theme.json)")
                                     putExtra(Intent.EXTRA_TEXT, jsonStr)
                                 }
-                                context.startActivity(Intent.createChooser(intent, "Share Theme JSON"))
+                                runCatching { context.startActivity(Intent.createChooser(intent, "Share Theme JSON")) }.onFailure { statusMsg = "No share app available on device." }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
                             shape = tokens.shapes.button,
@@ -670,11 +699,11 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             fontSize = scaledSp(12f),
                         )
 
-                        SettingsApiKeyField("The Odds API Key (500 credits/mo)", "Live Pinnacle, Betfair, Bet365 & US bookmaker odds", oddsApiInput) { oddsApiInput = it }
-                        SettingsApiKeyField("Football-Data.org Token (12 leagues)", "Official European football schedules & standings", fdOrgInput) { fdOrgInput = it }
-                        SettingsApiKeyField("OddsPapi Key (250 req/mo)", "Sharp exchange & bookmaker lines", oddsPapiInput) { oddsPapiInput = it }
-                        SettingsApiKeyField("CricketData.org Key (100 hits/day)", "Live IPL, T20, ODI & international cricket", cricketInput) { cricketInput = it }
-                        SettingsApiKeyField("API-Sports Key (100 req/day)", "Optional extra stats & injuries", apiSportsInput) { apiSportsInput = it }
+                        SettingsApiKeyField("The Odds API", "500 credits/mo · Pinnacle, Betfair, Bet365 & US bookmaker odds", oddsApiInput) { oddsApiInput = it }
+                        SettingsApiKeyField("Football-Data.org", "12 leagues · Official European football schedules & standings", fdOrgInput) { fdOrgInput = it }
+                        SettingsApiKeyField("OddsPapi", "250 req/mo · Sharp exchange & bookmaker lines", oddsPapiInput) { oddsPapiInput = it }
+                        SettingsApiKeyField("CricketData.org", "100 hits/day · Live IPL, T20, ODI & international cricket", cricketInput) { cricketInput = it }
+                        SettingsApiKeyField("API-Sports", "100 req/day · Optional extra stats & injuries", apiSportsInput) { apiSportsInput = it }
 
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -723,7 +752,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                         )
                                     }
                                     statusMsg = "Keys saved! Syncing live feeds..."
-                                    scope.launch { app.syncRepo.runOnDeviceWeeklySync() }
+                                    app.appScope.launch { app.syncRepo.runOnDeviceWeeklySync() }
                                 },
                                 shape = tokens.shapes.button,
                                 modifier = Modifier.weight(1f),
@@ -960,8 +989,9 @@ private fun SettingsApiKeyField(
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
-            label = { Text(label) },
+            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
             visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
                 IconButton(onClick = { visible = !visible }) {

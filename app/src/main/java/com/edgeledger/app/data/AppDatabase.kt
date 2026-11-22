@@ -78,7 +78,7 @@ data class PersonalBetEntity(
 @Entity(
     tableName = "odds_history",
     primaryKeys = ["fixtureId", "recordedAtEpochMs"],
-    indices = [Index(value = ["fixtureId"])],
+    indices = [Index(value = ["recordedAtEpochMs"])],
 )
 data class OddsHistoryEntity(
     val fixtureId: String,
@@ -154,6 +154,60 @@ abstract class AppDatabase : RoomDatabase() {
          * - Rebuilds locked_picks with fixtureId PK (deduplicating prior multi-locks per fixture)
          * - Creates odds_history table for real multi-sync line movement tracking
          */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `app_snapshot` (
+                        `id` INTEGER NOT NULL,
+                        `lastSyncEpochMs` INTEGER NOT NULL,
+                        `isSeedData` INTEGER NOT NULL,
+                        `totalHistoricalMatches` INTEGER NOT NULL,
+                        `payloadJson` TEXT NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `locked_picks` (
+                        `hashSha256` TEXT NOT NULL,
+                        `fixtureId` TEXT NOT NULL,
+                        `sport` TEXT NOT NULL,
+                        `matchup` TEXT NOT NULL,
+                        `pickLabel` TEXT NOT NULL,
+                        `chancePct` INTEGER NOT NULL,
+                        `modelVersion` TEXT NOT NULL,
+                        `lockedAtIso` TEXT NOT NULL,
+                        PRIMARY KEY(`hashSha256`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `personal_bets` (
+                        `id` TEXT NOT NULL,
+                        `createdAtIso` TEXT NOT NULL,
+                        `fixtureId` TEXT,
+                        `sport` TEXT NOT NULL,
+                        `leagueName` TEXT NOT NULL,
+                        `matchup` TEXT NOT NULL,
+                        `selection` TEXT NOT NULL,
+                        `decimalOdds` REAL NOT NULL,
+                        `closingOdds` REAL,
+                        `modelProb` REAL NOT NULL,
+                        `stakeAmount` REAL NOT NULL,
+                        `status` TEXT NOT NULL,
+                        `notes` TEXT NOT NULL,
+                        `isPaper` INTEGER NOT NULL,
+                        `bookmaker` TEXT NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE personal_bets ADD COLUMN settledPnl REAL")
@@ -213,7 +267,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "edgeledger_offline.db",
                 )
-                    .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { INSTANCE = it }
             }

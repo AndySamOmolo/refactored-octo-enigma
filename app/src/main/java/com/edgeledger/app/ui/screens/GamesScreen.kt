@@ -98,6 +98,16 @@ fun GamesScreen(
     val sortMode = runCatching { GameSortMode.valueOf(sortModeName) }.getOrDefault(GameSortMode.BEST_PICK)
 
     val daysOld = if (snapshot.lastSyncEpochMs <= 0L) 0L else ((Instant.now().toEpochMilli() - snapshot.lastSyncEpochMs) / 86_400_000L).coerceAtLeast(0L)
+    val sportCounts = remember(snapshot.fixtures) {
+        snapshot.fixtures.groupingBy { it.sport }.eachCount()
+    }
+    val orderedSports = remember(sportCounts) {
+        Sport.entries.sortedWith(
+            compareByDescending<Sport> { (sportCounts[it] ?: 0) > 0 }
+                .thenByDescending { sportCounts[it] ?: 0 }
+                .thenBy { it.ordinal }
+        )
+    }
     val filtered = remember(snapshot.fixtures, snapshot.profiles, selectedSport, strongOnly, valueOnly, favoritesOnly, prefs.pinnedTeams, sortMode) {
         val base = snapshot.fixtures.filter { fx ->
             (selectedSport == null || fx.sport == selectedSport) &&
@@ -108,7 +118,7 @@ fun GamesScreen(
         when (sortMode) {
             GameSortMode.BEST_PICK -> base.sortedByDescending { it.markets.topPicks.firstOrNull()?.chancePct ?: 0 }
             GameSortMode.KICKOFF -> base.sortedBy { it.kickoffIso }
-            GameSortMode.BEST_VALUE -> base.sortedByDescending { it.bestValueEdgePct ?: -99.0 }
+            GameSortMode.BEST_VALUE -> base.sortedByDescending { it.bestValueEdgePct ?: Double.NEGATIVE_INFINITY }
             GameSortMode.CLOSEST -> base.sortedBy { abs(it.markets.probHome - it.markets.probAway) }
             GameSortMode.POWER_GAP -> base.sortedByDescending { fx ->
                 val hp = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]?.powerScore ?: 50
@@ -140,7 +150,7 @@ fun GamesScreen(
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
                             text = when {
-                                snapshot.fixtures.isEmpty() -> "Tap Update to Sync Live Datasets"
+                                snapshot.fixtures.isEmpty() || snapshot.lastSyncEpochMs <= 0L -> "Tap Update to Sync Live Datasets"
                                 daysOld == 0L -> "Ready Offline · Updated Today"
                                 else -> "Ready Offline · Updated ${daysOld}d ago"
                             },
@@ -157,7 +167,7 @@ fun GamesScreen(
                         )
                     }
                     Button(
-                        onClick = { scope.launch { app.syncRepo.runOnDeviceWeeklySync() } },
+                        onClick = { app.appScope.launch { app.syncRepo.runOnDeviceWeeklySync() } },
                         enabled = !syncing,
                         colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
                         shape = tokens.shapes.button,
@@ -201,7 +211,7 @@ fun GamesScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item(key = "all") {
-                TokenPill("All Sports", selectedSport == null && !favoritesOnly && !valueOnly && !strongOnly, {
+                TokenPill("All (${snapshot.fixtures.size})", selectedSport == null && !favoritesOnly && !valueOnly && !strongOnly, {
                     selectedSportName = null; favoritesOnly = false; valueOnly = false; strongOnly = false
                 })
             }
@@ -214,8 +224,9 @@ fun GamesScreen(
             item(key = "strong") {
                 TokenPill("Strong Picks", strongOnly, { strongOnly = !strongOnly }, activeColor = c.win, activeContainer = c.winDim)
             }
-            items(Sport.entries, key = { it.name }) { sp ->
-                TokenPill(sp.label, selectedSport == sp, { selectedSportName = if (selectedSport == sp) null else sp.name })
+            items(orderedSports, key = { it.name }) { sp ->
+                val cnt = sportCounts[sp] ?: 0
+                TokenPill("${sp.label} ($cnt)", selectedSport == sp, { selectedSportName = if (selectedSport == sp) null else sp.name })
             }
         }
 
@@ -247,11 +258,25 @@ fun GamesScreen(
                             when {
                                 snapshot.fixtures.isEmpty() -> "Tap Update above to sync live upcoming fixtures and historical datasets."
                                 favoritesOnly -> "Tap the star icon on any game card to pin your favorite teams."
-                                else -> "Tap All Sports to see every upcoming game."
+                                else -> "Clear your active filters to see all ${snapshot.fixtures.size} upcoming games."
                             },
                             color = c.textMuted,
                             fontSize = scaledSp(13f),
                         )
+                        if (snapshot.fixtures.isNotEmpty() && (selectedSport != null || strongOnly || valueOnly || favoritesOnly)) {
+                            Button(
+                                onClick = {
+                                    selectedSportName = null
+                                    strongOnly = false
+                                    valueOnly = false
+                                    favoritesOnly = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+                                shape = tokens.shapes.button,
+                            ) {
+                                Text("Clear Filters", fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(12.5f))
+                            }
+                        }
                     }
                 }
             } else {
@@ -298,8 +323,9 @@ private fun CompactFixtureRow(
     onClick: () -> Unit,
 ) {
     val c = AppTheme.tokens.colors
-    val hPct = (fixture.markets.probHome * 100).roundToInt()
-    val aPct = (fixture.markets.probAway * 100).roundToInt()
+    val hPct = (fixture.markets.probHome.takeIf { it.isFinite() } ?: 0.5).times(100).roundToInt()
+    val dPct = (fixture.markets.probDraw.takeIf { it.isFinite() } ?: 0.0).times(100).roundToInt()
+    val aPct = (100 - hPct - (if (fixture.sport.hasDraw) dPct else 0)).coerceAtLeast(0)
     SectionCard(modifier = Modifier.clickable(onClick = onClick)) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -308,7 +334,7 @@ private fun CompactFixtureRow(
                 Text("${fixture.playerProps.size} player props · Top: ${fixture.markets.topPicks.firstOrNull()?.label ?: "—"}", color = c.textMuted, fontSize = scaledSp(11.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text("$hPct% – $aPct%", style = tabularStyle(13.5f, FontWeight.ExtraBold, c.win))
+                Text(if (fixture.sport.hasDraw) "$hPct% / $dPct% / $aPct%" else "$hPct% – $aPct%", style = tabularStyle(13.5f, FontWeight.ExtraBold, c.win))
                 IconButton(onClick = onTogglePin, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = if (isPinned) Icons.Filled.Star else Icons.Outlined.StarBorder,
@@ -384,7 +410,7 @@ private fun FixtureCard(
             }
             Text("VS", color = c.textMuted, fontSize = scaledSp(11f), fontWeight = FontWeight.ExtraBold)
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
-                Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 8.dp)) {
+                Column(horizontalAlignment = Alignment.End, modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp)) {
                     Text(fixture.awayTeam, color = c.text, fontSize = scaledSp(13.5f), fontWeight = FontWeight.ExtraBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text("Power $awayPower/99", color = c.textMuted, fontSize = scaledSp(11f))
                 }

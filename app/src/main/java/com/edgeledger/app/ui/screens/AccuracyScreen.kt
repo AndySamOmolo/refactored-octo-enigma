@@ -77,32 +77,44 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
             }
 
             SectionCard {
+                val binTotal = rec.reliabilityBins.sumOf { it.count }
+                val binHits = rec.reliabilityBins.sumOf { ((it.actualWinPct / 100.0) * it.count).roundToInt() }
+                val baselineRate = if (rec.sport.hasDraw) 1.0 / 3.0 else 0.50
+                val sig = if (binTotal > 0) {
+                    OddsMath.computeSignificance(binHits.coerceIn(0, binTotal), binTotal, baselineRate)
+                } else null
+                val isNegativeRoi = rec.hasGradedOdds && rec.simulatedProfitPct < 0.0
+                val (badgeTxt, badgeFg, badgeBg) = when {
+                    rec.beatsSimpleGuess && rec.gamesTested >= 20 && !isNegativeRoi -> Triple("Strong Record", c.win, c.winDim)
+                    rec.beatsSimpleGuess && isNegativeRoi -> Triple("Calibrated · Neg ROI", c.draw, c.drawDim)
+                    isNegativeRoi -> Triple("Negative ROI", c.loss, c.lossDim)
+                    else -> Triple("Building History", c.draw, c.drawDim)
+                }
+                val (skillSub, skillSubColor) = when {
+                    rec.beatsSimpleGuess -> "Beats baseline" to c.win
+                    sig != null && sig.zScore < -1.0 -> "Below baseline" to c.loss
+                    else -> "Near baseline" to c.draw
+                }
+                val roiSub = if (rec.hasGradedOdds) (if (rec.simulatedProfitPct >= 0.0) "Profitable" else "Unprofitable") else null
+                val roiSubColor = if (rec.simulatedProfitPct >= 0.0) c.win else c.loss
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(title, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f), modifier = Modifier.weight(1f))
-                    val (badgeTxt, badgeFg, badgeBg) = when {
-                        rec.beatsSimpleGuess -> Triple("Strong Record", c.win, c.winDim)
-                        rec.hasGradedOdds && rec.simulatedProfitPct < 0.0 -> Triple("Negative ROI", c.loss, c.lossDim)
-                        else -> Triple("Building History", c.draw, c.drawDim)
-                    }
                     StatusBadge(text = badgeTxt, color = badgeFg, containerColor = badgeBg)
                 }
-                val binTotal = rec.reliabilityBins.sumOf { it.count }
-                val binHits = rec.reliabilityBins.sumOf { ((it.actualWinPct / 100.0) * it.count).roundToInt() }
-                val sig = if (binTotal > 0) {
-                    OddsMath.computeSignificance(binHits.coerceIn(0, binTotal), binTotal, if (rec.sport.hasDraw) 0.44 else 0.50)
-                } else null
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricTile("Skill Score", "${rec.accuracyScore}/100", sig?.plainLabel, Modifier.weight(1f))
+                    MetricTile("Skill Score", "${rec.accuracyScore}/100", skillSub, Modifier.weight(1f), subtitleColor = skillSubColor)
                     MetricTile("Games", "${rec.gamesTested}", null, Modifier.weight(1f))
                     MetricTile(
                         "Sim ROI",
                         if (rec.hasGradedOdds) "${if (rec.simulatedProfitPct >= 0) "+" else ""}${String.format(Locale.US, "%.1f", rec.simulatedProfitPct)}%" else "N/A",
-                        null,
+                        roiSub,
                         Modifier.weight(1f),
+                        subtitleColor = roiSubColor,
                     )
                 }
                 if (rec.reliabilityBins.isNotEmpty()) {
@@ -111,7 +123,7 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             Text(bin.rangeLabel, style = tabularStyle(11f, FontWeight.Bold, c.textSecondary), modifier = Modifier.width(52.dp))
                             Box(modifier = Modifier.weight(1f).height(8.dp).clip(RoundedCornerShape(4.dp)).background(c.surfaceRaised)) {
-                                Box(modifier = Modifier.fillMaxWidth((bin.actualWinPct / 100f).coerceIn(0.05f, 1f)).fillMaxHeight().background(c.accent))
+                                if (bin.actualWinPct > 0) Box(modifier = Modifier.fillMaxWidth((bin.actualWinPct / 100f).coerceIn(0.03f, 1f)).fillMaxHeight().background(c.accent))
                             }
                             Text("${bin.actualWinPct}% (${bin.count})", style = tabularStyle(11f, FontWeight.Medium, c.textMuted), modifier = Modifier.width(68.dp))
                         }

@@ -266,10 +266,20 @@ object PredictionEngine {
             var lambda = (((hAtk * aDef) / lgAvg) * 1.07 * (1.0 + rFactor * 0.50)).coerceIn(0.30, 4.0)
             var mu = (((aAtk * hDef) / lgAvg) * 0.93 * (1.0 - rFactor * 0.50)).coerceIn(0.24, 3.6)
 
-            // If blending with sharp market, gently shift lambda/mu pre-matrix so ALL derived markets stay coherent
+            // Compare 3-way sharp market home win prob against unblended 3-way Poisson home win prob (no 2-way/3-way bias!)
             if (safeMarketH != null && safeBlendW > 0.0) {
-                val baseH = expectedEloScore(hElo + homeAdvFor(Sport.FOOTBALL), aElo)
-                val shift = ((safeMarketH - baseH) * safeBlendW * 1.4).coerceIn(-0.45, 0.45)
+                var rawH = 0.0
+                var rawTotal = 0.0
+                for (gh in 0..8) {
+                    val phG = StatsMath.poissonPmf(gh, lambda)
+                    for (ga in 0..8) {
+                        val pCell = phG * StatsMath.poissonPmf(ga, mu)
+                        rawTotal += pCell
+                        if (gh > ga) rawH += pCell
+                    }
+                }
+                val base3WayHome = if (rawTotal > 0.0) rawH / rawTotal else 0.44
+                val shift = ((safeMarketH - base3WayHome) * safeBlendW * 1.4).coerceIn(-0.45, 0.45)
                 lambda = (lambda * exp(shift)).coerceIn(0.30, 4.2)
                 mu = (mu * exp(-shift)).coerceIn(0.24, 3.8)
             }
@@ -468,14 +478,22 @@ object PredictionEngine {
             val projAces = (homeProfile?.avgAces ?: 6.8) + (awayProfile?.avgAces ?: 6.4)
             val projDf = (homeProfile?.avgDoubleFaults ?: 2.4) + (awayProfile?.avgDoubleFaults ?: 2.5)
 
+            val signedGameMargin = ((pSetA - 0.5) * 9.5).coerceIn(-6.5, 6.5)
+            val projHomeGames = ((projGames + signedGameMargin) / 2.0).coerceIn(4.0, 15.0)
+            val projAwayGames = (projGames - projHomeGames).coerceIn(4.0, 15.0)
+            val straightTotal = straightA + straightB
+            val pickStraight = straightTotal >= threeSets
+            val setsPickProb = if (pickStraight) straightTotal else threeSets
+            val setsPickLabel = if (pickStraight) "Straight Sets (2-0)" else "Goes to 3 Sets"
+
             return FullMatchMarkets(
-                projectedHome = projGames * matchA,
-                projectedAway = projGames * (1.0 - matchA),
+                projectedHome = projHomeGames,
+                projectedAway = projAwayGames,
                 probHome = matchA,
                 probDraw = 0.0,
                 probAway = 1.0 - matchA,
                 firstSetHomePct = toPct(pSetA),
-                straightSetsPct = toPct(straightA + straightB),
+                straightSetsPct = toPct(straightTotal),
                 goesToThreeSetsPct = toPct(threeSets),
                 gameHandicapLabel = "$favSurname -2.5 Games",
                 gameHandicapPct = toPct(hcapProb),
@@ -488,7 +506,7 @@ object PredictionEngine {
                 topPicks = listOf(
                     MarketPickItem("atp_w", "Match Result", "$favName to Win", toPct(favProb), conf(favProb), "Stronger ${surface ?: "Hard"}-court serve and overall form."),
                     MarketPickItem("atp_s1", "First Set", "$favName to Win 1st Set", toPct(favFirstSetProb), conf(favFirstSetProb), "Higher projected service hold rate."),
-                    MarketPickItem("atp_sets", "Sets", if (straightA + straightB >= 0.58) "Straight Sets (2-0)" else "Goes to 3 Sets", toPct(max(straightA + straightB, threeSets)), conf(max(straightA + straightB, threeSets)), "Projected ${String.format(Locale.US, "%.1f", projGames)} games (${toPct(tbChance)}% tiebreak chance)."),
+                    MarketPickItem("atp_sets", "Sets", setsPickLabel, toPct(setsPickProb), conf(setsPickProb), "Projected ${String.format(Locale.US, "%.1f", projGames)} games (${toPct(tbChance)}% tiebreak chance)."),
                 ),
             )
         }
@@ -531,8 +549,12 @@ object PredictionEngine {
         val unit = cfg[8] as String
 
         // Home concedes away baseline; away concedes home baseline
-        val rawH = ((homeProfile?.avgScored ?: defScoreH) + (awayProfile?.avgConceded ?: defScoreH)) / 2.0
-        val rawA = ((awayProfile?.avgScored ?: defScoreA) + (homeProfile?.avgConceded ?: defScoreA)) / 2.0
+        val hScored = homeProfile?.takeIf { it.gamesPlayed > 0 }?.avgScored ?: defScoreH
+        val hConceded = homeProfile?.takeIf { it.gamesPlayed > 0 }?.avgConceded ?: defScoreA
+        val aScored = awayProfile?.takeIf { it.gamesPlayed > 0 }?.avgScored ?: defScoreA
+        val aConceded = awayProfile?.takeIf { it.gamesPlayed > 0 }?.avgConceded ?: defScoreH
+        val rawH = (hScored + aConceded) / 2.0
+        val rawA = (aScored + hConceded) / 2.0
         val total = (rawH + rawA).coerceAtLeast(if (sport == Sport.F1 || sport == Sport.MMA) 1.0 else 2.0)
 
         val probImpliedMargin = StatsMath.normalInvCdf(winH.coerceIn(0.03, 0.97)) * marginSd

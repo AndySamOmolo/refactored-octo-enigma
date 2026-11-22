@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CompareArrows
@@ -181,7 +182,7 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
             NavHost(
                 navController = navController,
                 startDestination = "games",
-                modifier = Modifier.padding(innerPadding),
+                modifier = Modifier.padding(innerPadding).consumeWindowInsets(innerPadding),
             ) {
                 composable("games") {
                     GamesScreen(
@@ -200,8 +201,7 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
                     route = "match/{matchId}",
                     arguments = listOf(navArgument("matchId") { type = NavType.StringType }),
                 ) { entry ->
-                    val raw = entry.arguments?.getString("matchId") ?: ""
-                    val decoded = runCatching { Uri.decode(raw) }.getOrDefault(raw)
+                    val decoded = entry.arguments?.getString("matchId") ?: ""
                     MatchDetailScreen(
                         app = app,
                         matchId = decoded,

@@ -13,6 +13,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
+import java.text.Normalizer
 import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.max
@@ -187,8 +188,16 @@ object CsvAndFeedParsers {
 
     fun canonicalTeam(rawName: String, sport: Sport): String = normalizeTeam(rawName, sport)
 
+    private val DIACRITICS_REGEX = Regex("\\p{InCombiningDiacriticalMarks}+")
+
+    private fun stripDiacritics(input: String): String =
+        DIACRITICS_REGEX.replace(Normalizer.normalize(input, Normalizer.Form.NFD), "")
+
+    private fun safeHttpsUrl(url: String?): String? =
+        url?.trim()?.takeIf { it.startsWith("https://", ignoreCase = true) }
+
     fun normalizeTeam(rawName: String, sport: Sport): String {
-        val cleaned = rawName.trim().replace(whitespaceRegex, " ")
+        val cleaned = stripDiacritics(rawName).trim().replace(whitespaceRegex, " ")
         if (cleaned.isBlank()) return ""
         return when (sport) {
             Sport.NFL -> {
@@ -266,7 +275,7 @@ object CsvAndFeedParsers {
         val d = parts[0].toIntOrNull() ?: return null
         val m = parts[1].toIntOrNull() ?: return null
         val rawY = parts[2].toIntOrNull() ?: return null
-        val y = if (rawY < 100) 2000 + rawY else rawY
+        val y = when { rawY in 70..99 -> 1900 + rawY; rawY in 0..69 -> 2000 + rawY; else -> rawY }
         return runCatching { LocalDate.of(y, m, d).toString() }.getOrNull()
     }
 
@@ -481,21 +490,23 @@ object CsvAndFeedParsers {
                 ?: continue
             if (homeObj === awayObj) continue
 
-            val homeTeamObj = homeObj.obj("team")
-            val awayTeamObj = awayObj.obj("team")
-            val rawHome = homeTeamObj?.str("displayName") ?: homeTeamObj?.str("shortDisplayName") ?: continue
-            val rawAway = awayTeamObj?.str("displayName") ?: awayTeamObj?.str("shortDisplayName") ?: continue
+            val homeTeamObj = homeObj.obj("team") ?: homeObj.obj("athlete")
+            val awayTeamObj = awayObj.obj("team") ?: awayObj.obj("athlete")
+            val rawHome = homeTeamObj?.str("displayName") ?: homeTeamObj?.str("shortDisplayName") ?: homeTeamObj?.str("fullName") ?: continue
+            val rawAway = awayTeamObj?.str("displayName") ?: awayTeamObj?.str("shortDisplayName") ?: awayTeamObj?.str("fullName") ?: continue
             val hName = normalizeTeam(rawHome, sport)
             val aName = normalizeTeam(rawAway, sport)
             if (hName.isBlank() || aName.isBlank() || hName == aName) continue
 
             val statusType = comp.obj("status")?.obj("type") ?: ev.obj("status")?.obj("type")
             val state = statusType?.str("state")?.lowercase(Locale.ROOT).orEmpty()
+            val statusName = statusType?.str("name")?.uppercase(Locale.ROOT).orEmpty()
+            if (statusName.contains("POSTPONED") || statusName.contains("CANCEL") || statusName.contains("ABANDON")) continue
             val isCompleted = statusType?.bool("completed") == true || state == "post"
 
             if (isCompleted) {
-                val hScore = homeObj.str("score")?.toIntOrNull()
-                val aScore = awayObj.str("score")?.toIntOrNull()
+                val hScore = homeObj.str("score")?.substringBefore("/")?.trim()?.toIntOrNull()
+                val aScore = awayObj.str("score")?.substringBefore("/")?.trim()?.toIntOrNull()
                 val dateIso = parseIsoDateSafe(kickoff)
                 if (hScore != null && aScore != null && hScore >= 0 && aScore >= 0 && dateIso != null) {
                     completed.add(
@@ -527,8 +538,8 @@ object CsvAndFeedParsers {
                         awayTeamId = awayTeamObj?.str("id"),
                         homeLeaders = extractEspnLeaders(homeObj),
                         awayLeaders = extractEspnLeaders(awayObj),
-                        homeLogoUrl = homeTeamObj?.str("logo"),
-                        awayLogoUrl = awayTeamObj?.str("logo"),
+                        homeLogoUrl = safeHttpsUrl(homeTeamObj?.str("logo")),
+                        awayLogoUrl = safeHttpsUrl(awayTeamObj?.str("logo")),
                     )
                 )
             }
@@ -581,6 +592,84 @@ object CsvAndFeedParsers {
             }
         }
         return result
+    }
+
+
+    fun parseEspnNflStandings(raw: String): Map<String, TeamProfile> {
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyMap()
+        val children = root.arr("children") ?: return emptyMap()
+        val out = LinkedHashMap<String, TeamProfile>()
+
+        fun collectEntries(node: JsonObject): List<JsonObject> {
+            val direct = node.obj("standings")?.arr("entries")?.mapNotNull { it as? JsonObject }.orEmpty()
+            if (direct.isNotEmpty()) return direct
+            return node.arr("children")
+                ?.mapNotNull { it as? JsonObject }
+                ?.flatMap { div -> div.obj("standings")?.arr("entries")?.mapNotNull { it as? JsonObject }.orEmpty() }
+                .orEmpty()
+        }
+
+        for (confElem in children) {
+            val conf = confElem as? JsonObject ?: continue
+            for (entry in collectEntries(conf)) {
+                val teamObj = entry.obj("team") ?: continue
+                val rawName = teamObj.str("displayName") ?: continue
+                val teamName = normalizeTeam(rawName, Sport.NFL)
+                if (teamName.isBlank()) continue
+
+                val stats = entry.arr("stats")?.mapNotNull { it as? JsonObject }.orEmpty()
+                fun statVal(name: String): Double? =
+                    stats.firstOrNull { it.str("name").equals(name, ignoreCase = true) }
+                        ?.dbl("value")
+                        ?.takeIf { it.isFinite() }
+                fun statDisplay(name: String): String? =
+                    stats.firstOrNull { it.str("name").equals(name, ignoreCase = true) }
+                        ?.str("displayValue")
+
+                val wins = (statVal("wins") ?: 0.0).toInt().coerceAtLeast(0)
+                val losses = (statVal("losses") ?: 0.0).toInt().coerceAtLeast(0)
+                val ties = (statVal("ties") ?: 0.0).toInt().coerceAtLeast(0)
+                val gp = wins + losses + ties
+                val safeGp = max(1, gp)
+
+                val winPct = (
+                    statVal("winPercent")?.let { it * 100.0 }
+                        ?: if (gp > 0) ((wins + 0.5 * ties) / safeGp * 100.0) else 50.0
+                    ).coerceIn(0.0, 100.0)
+
+                val ppg = statVal("avgPointsFor")
+                    ?: statVal("pointsFor")?.let { if (gp > 0) it / safeGp else null }
+                    ?: 22.5
+                val oppPpg = statVal("avgPointsAgainst")
+                    ?: statVal("pointsAgainst")?.let { if (gp > 0) it / safeGp else null }
+                    ?: 22.5
+
+                val diffBoost = if (gp > 0) ((ppg - oppPpg) * 3.5).coerceIn(-80.0, 80.0) else 0.0
+                val elo = (1500.0 + (winPct - 50.0) * 5.0 + diffBoost).coerceIn(1150.0, 1850.0)
+                val power = ((elo - 1250.0) / 5.0).toInt().coerceIn(20, 99)
+                val streak = parseStreakCode(statDisplay("streak"))
+                val logo = teamObj.arr("logos")?.firstOrNull()?.let { (it as? JsonObject)?.str("href") }
+
+                out[PredictionEngine.profileKey(Sport.NFL, teamName)] = TeamProfile(
+                    team = teamName,
+                    sport = Sport.NFL,
+                    leagueId = "NFL",
+                    elo = elo,
+                    powerScore = power,
+                    gamesPlayed = gp,
+                    wins = wins,
+                    losses = losses,
+                    winPct = winPct,
+                    homeWinPct = (winPct + 3.5).coerceIn(10.0, 95.0),
+                    awayWinPct = (winPct - 3.5).coerceIn(5.0, 90.0),
+                    avgScored = ppg,
+                    avgConceded = oppPpg,
+                    recentForm = streak,
+                    logoUrl = logo,
+                )
+            }
+        }
+        return out
     }
 
     fun parseEspnNbaStandings(raw: String): Map<String, TeamProfile> {

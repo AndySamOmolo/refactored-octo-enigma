@@ -25,6 +25,7 @@ import com.edgeledger.app.theme.autoFixContrastHex
 import com.edgeledger.app.theme.computeContrastRatio
 import com.edgeledger.app.theme.parseHexColor
 import com.edgeledger.app.theme.resolveTokens
+import com.edgeledger.app.ui.components.formatLocalKickoff
 import com.edgeledger.app.ui.components.formatStatValue
 import com.edgeledger.app.ui.components.shortTeamName
 import okhttp3.OkHttpClient
@@ -291,5 +292,78 @@ class EdgeLedgerEngineTest {
         nba.topPicks.forEach { pk ->
             assertTrue("Expected pick >= 50%, got ${pk.label} (${pk.chancePct}%)", pk.chancePct >= 50)
         }
+    }
+
+    @Test
+    fun kickoffFormatterNhlShortNamesAndEspnNflStandingsWork() {
+        // ESPN ISO timestamp without seconds parses cleanly instead of showing raw YYYY-MM-DD
+        val formatted = formatLocalKickoff("2026-11-22T18:00Z")
+        assertFalse("Should not fall back to raw ISO date: $formatted", formatted.startsWith("2026-"))
+        assertTrue(formatted.contains("·"))
+
+        // NHL short names never truncate mid-word
+        assertEquals("Rangers", shortTeamName("New York Rangers"))
+        assertEquals("Lightning", shortTeamName("Tampa Bay Lightning"))
+        assertEquals("Hurricanes", shortTeamName("Carolina Hurricanes"))
+        assertEquals("Sabres", shortTeamName("Buffalo Sabres"))
+
+        // ESPN NFL Standings parser handles division-nested schema
+        val sampleNflJson = """
+            {"children":[{"children":[{"standings":{"entries":[
+              {"team":{"displayName":"Kansas City Chiefs","logos":[{"href":"https://a.espncdn.com/i/teamlogos/nfl/500/kc.png"}]},
+               "stats":[{"name":"wins","value":9},{"name":"losses","value":1},{"name":"pointsFor","value":260},{"name":"pointsAgainst","value":180},{"name":"streak","displayValue":"W4"}]}
+            ]}}]}]}
+        """.trimIndent()
+        val nflProfiles = CsvAndFeedParsers.parseEspnNflStandings(sampleNflJson)
+        val kc = nflProfiles[PredictionEngine.profileKey(Sport.NFL, "Kansas City Chiefs")]
+        assertNotNull(kc)
+        assertTrue((kc?.powerScore ?: 50) > 65)
+        assertEquals(26.0, kc?.avgScored ?: 0.0, 0.01)
+        assertEquals(4, kc?.recentForm?.size)
+    }
+
+    @Test
+    fun regressionTestsForAuditCriticalFixesPass() {
+        // C-05 / M6: NaN guards in erf & normalCdf
+        assertEquals(0.0, StatsMath.erf(Double.NaN), 0.0001)
+        assertEquals(0.5, StatsMath.normalCdf(Double.NaN), 0.0001)
+
+        // M7: Poisson normal approx for large mean (>100) never underflows
+        val largeOver = StatsMath.poissonOverProb(200.0, 195.5)
+        assertTrue(largeOver in 0.55..0.75)
+        val largeQ = StatsMath.poissonQuantile(200.0, 0.50)
+        assertTrue(largeQ in 195..205)
+
+        // C3: Low-xG football player props never throw IllegalArgumentException
+        val lowXgProps = PlayerPropsEngine.generatePlayerProps(
+            sport = Sport.FOOTBALL,
+            homeTeam = "Underdog FC",
+            awayTeam = "Giant FC",
+            projectedHomeScore = 0.05,
+            projectedAwayScore = 2.8,
+            homePower = 30,
+            awayPower = 90,
+            liveHomePlayers = listOf(LivePlayerEntry("Striker A", "ST"), LivePlayerEntry("Mid B", "MID")),
+            liveAwayPlayers = listOf(LivePlayerEntry("Striker C", "ST")),
+        )
+        assertTrue(lowXgProps.isNotEmpty())
+
+        // C-04: Tennis Bo3 projected games stay physically realistic (<= 15 per player)
+        val tennis = PredictionEngine.predictAllMarkets(Sport.TENNIS, "Player A", "Player B", null, null, surface = "Hard")
+        assertTrue(tennis.projectedHome in 4.0..15.0)
+        assertTrue(tennis.projectedAway in 4.0..15.0)
+
+        // C-14: Empty JSON object must not reset theme
+        assertNull(ThemeCodec.decodeOrNull("{}"))
+
+        // C5: Word-boundary sports filter rejects ambiguous non-sports headlines
+        val client = OptionalOddsAndDataClient(OkHttpClient())
+        assertFalse(client.isSportsMarketQuestion("Will United States GDP beat expectations?"))
+        assertTrue(client.isSportsMarketQuestion("Will Arsenal win the Premier League?"))
+
+        // H35: Color-blind mode remaps semantic win/loss tokens
+        val darkTokens = resolveTokens(ThemeConfigV1(mode = ThemeMode.DARK))
+        val deutTokens = resolveTokens(ThemeConfigV1(mode = ThemeMode.DEUTERANOPIA))
+        assertTrue(darkTokens.colors.win != deutTokens.colors.win)
     }
 }

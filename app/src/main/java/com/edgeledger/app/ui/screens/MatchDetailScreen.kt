@@ -21,6 +21,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -30,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,7 +86,7 @@ fun MatchDetailScreen(
         snapshot.fixtures.find { it.id == matchId }
     }
 
-    var savedBanner by remember { mutableStateOf<String?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TopAppBar(
@@ -126,23 +130,22 @@ fun MatchDetailScreen(
         val defHomeOdds = firstLine?.homeOdds ?: (1.0 / (m.probHome.coerceAtLeast(0.05) * 1.045)).coerceIn(1.05, 25.0)
         val defDrawOdds = firstLine?.drawOdds ?: if (fixture.sport.hasDraw && m.probDraw > 0.03) (1.0 / (m.probDraw * 1.045)).coerceIn(1.50, 25.0) else 3.40
         val defAwayOdds = firstLine?.awayOdds ?: (1.0 / (m.probAway.coerceAtLeast(0.05) * 1.045)).coerceIn(1.05, 25.0)
-        var homeOddsStr by remember(fixture.id, firstLine) { mutableStateOf(String.format(Locale.US, "%.2f", defHomeOdds)) }
-        var drawOddsStr by remember(fixture.id, firstLine) { mutableStateOf(String.format(Locale.US, "%.2f", defDrawOdds)) }
-        var awayOddsStr by remember(fixture.id, firstLine) { mutableStateOf(String.format(Locale.US, "%.2f", defAwayOdds)) }
+        var homeOddsStr by rememberSaveable(fixture.id, firstLine?.homeOdds) { mutableStateOf(String.format(Locale.US, "%.2f", defHomeOdds)) }
+        var drawOddsStr by rememberSaveable(fixture.id, firstLine?.drawOdds) { mutableStateOf(String.format(Locale.US, "%.2f", defDrawOdds)) }
+        var awayOddsStr by rememberSaveable(fixture.id, firstLine?.awayOdds) { mutableStateOf(String.format(Locale.US, "%.2f", defAwayOdds)) }
 
-        fun savePick(label: String, odds: Double, chance: Double) {
-            val stake = max(
-                10.0,
-                OddsMath.recommendedStake(
-                    bankroll = activeBankroll,
-                    modelProb = chance,
-                    decimalOdds = odds,
-                    mode = prefs.stakingMode,
-                    kellyFraction = prefs.riskStyle.kellyFraction,
-                    maxCap = prefs.riskStyle.maxStakePct,
-                ).roundToInt().toDouble(),
+        fun savePick(label: String, odds: Double, chance: Double, explicitStake: Double? = null) {
+            val computed = explicitStake ?: OddsMath.recommendedStake(
+                bankroll = activeBankroll,
+                modelProb = chance,
+                decimalOdds = odds,
+                mode = prefs.stakingMode,
+                kellyFraction = prefs.riskStyle.kellyFraction,
+                maxCap = prefs.riskStyle.maxStakePct,
             )
-            scope.launch {
+            val fallbackUnit = (activeBankroll * 0.01).coerceIn(1.0, activeBankroll)
+            val stake = (if (computed > 0.0) computed else fallbackUnit).roundToInt().coerceAtLeast(1).toDouble()
+            app.appScope.launch {
                 val nowMs = System.currentTimeMillis()
                 app.database.dao().upsertBet(
                     PersonalBetEntity(
@@ -160,28 +163,23 @@ fun MatchDetailScreen(
                         isPaper = prefs.isPaperTrading,
                     )
                 )
-                val ledgerName = if (prefs.isPaperTrading) "Paper Picks" else "My Picks"
-                savedBanner = "Saved \"$label\" ($${stake.toInt()}) to $ledgerName"
+            }
+            val ledgerName = if (prefs.isPaperTrading) "Paper Picks" else "My Picks"
+            scope.launch {
+                snackbarHostState.showSnackbar("Saved \"$label\" ($${stake.toInt()}) to $ledgerName")
             }
         }
 
+        Scaffold(
+            containerColor = androidx.compose.ui.graphics.Color.Transparent,
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+        ) { pad ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().padding(pad),
             contentPadding = PaddingValues(horizontal = tokens.padMd, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (savedBanner != null) {
-                item {
-                    Surface(
-                        color = c.winDim,
-                        shape = RoundedCornerShape(tokens.cornerMd),
-                        border = BorderStroke(1.dp, c.win),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(savedBanner.orEmpty(), color = c.win, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f), modifier = Modifier.padding(12.dp))
-                    }
-                }
-            }
+
 
             item {
                 SectionCard(useHeroGradient = true) {
@@ -198,7 +196,6 @@ fun MatchDetailScreen(
                             TeamAvatar(fixture.homeTeam, size = 48.dp, logoUrl = fixture.homeLogoUrl)
                             Text(fixture.homeTeam, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(13.5f), textAlign = TextAlign.Center)
                             Text("Power ${pH?.powerScore ?: 50}/99", color = c.textSecondary, fontSize = scaledSp(11f))
-                            FormDots(pH?.recentForm.orEmpty())
                         }
                         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 6.dp)) {
                             Text("PROJECTED", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
@@ -221,7 +218,13 @@ fun MatchDetailScreen(
                             TeamAvatar(fixture.awayTeam, size = 48.dp, logoUrl = fixture.awayLogoUrl)
                             Text(fixture.awayTeam, color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(13.5f), textAlign = TextAlign.Center)
                             Text("Power ${pA?.powerScore ?: 50}/99", color = c.textSecondary, fontSize = scaledSp(11f))
-                            FormDots(pA?.recentForm.orEmpty())
+                        }
+                    }
+                    if (!pH?.recentForm.isNullOrEmpty() || !pA?.recentForm.isNullOrEmpty()) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            FormDots(pH?.recentForm.orEmpty(), alignEnd = false)
+                            Text("Last 5", color = c.textMuted, fontSize = scaledSp(11f), fontWeight = FontWeight.SemiBold)
+                            FormDots(pA?.recentForm.orEmpty(), alignEnd = true)
                         }
                     }
                     ProbBar(
@@ -487,7 +490,17 @@ fun MatchDetailScreen(
                         )
                     }
                     evals.forEach { ev ->
-                        val dollars = (activeBankroll * ev.suggestedStakeFraction).roundToInt()
+                        val recStake = if (ev.isGoodValue) {
+                            OddsMath.recommendedStake(
+                                bankroll = activeBankroll,
+                                modelProb = ev.modelProb,
+                                decimalOdds = ev.decimalOdds,
+                                mode = prefs.stakingMode,
+                                kellyFraction = prefs.riskStyle.kellyFraction,
+                                maxCap = prefs.riskStyle.maxStakePct,
+                            )
+                        } else 0.0
+                        val dollars = recStake.roundToInt()
                         Surface(
                             color = if (ev.isGoodValue) c.winDim else c.surfaceRaised,
                             border = BorderStroke(1.dp, if (ev.isGoodValue) c.win else c.border),
@@ -501,10 +514,10 @@ fun MatchDetailScreen(
                                 }
                                 Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(end = 8.dp)) {
                                     Text(if (ev.isGoodValue) "Good Value (+${(ev.expectedValue * 100).roundToInt()}%)" else "Skip", color = if (ev.isGoodValue) c.win else c.textMuted, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(12f))
-                                    Text(if (dollars > 0) "Bet $$dollars" else "No edge", color = c.textSecondary, fontSize = scaledSp(11f))
+                                    Text(if (ev.isGoodValue && dollars > 0) "Suggested $$dollars" else "No edge", color = c.textSecondary, fontSize = scaledSp(11f))
                                 }
                                 Button(
-                                    onClick = { savePick(ev.label, ev.decimalOdds, ev.modelProb) },
+                                    onClick = { savePick(ev.label, ev.decimalOdds, ev.modelProb, explicitStake = if (recStake > 0.0) recStake else null) },
                                     colors = ButtonDefaults.buttonColors(containerColor = c.accent),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 ) {
@@ -513,10 +526,12 @@ fun MatchDetailScreen(
                             }
                         }
                     }
+                    Text("For personal analytics & informational use only.", color = c.textMuted, fontSize = scaledSp(11f))
                 }
             }
 
-            item { Spacer(Modifier.height(88.dp)) }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
         }
     }
 }

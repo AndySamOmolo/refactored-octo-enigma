@@ -62,6 +62,7 @@ import com.edgeledger.app.engine.PlayerPropPrediction
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.theme.HapticLevel
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -172,14 +173,62 @@ fun shortTeamName(fullName: String): String {
         "chicago bears" to "Bears",
         "atlanta falcons" to "Falcons",
         "new orleans saints" to "Saints",
-        "miami dolphins" to "Dolphins",
+                "miami dolphins" to "Dolphins",
+        "anaheim ducks" to "Ducks",
+        "boston bruins" to "Bruins",
+        "buffalo sabres" to "Sabres",
+        "calgary flames" to "Flames",
+        "carolina hurricanes" to "Hurricanes",
+        "chicago blackhawks" to "Blackhawks",
+        "colorado avalanche" to "Avalanche",
+        "columbus blue jackets" to "Blue Jackets",
+        "dallas stars" to "Stars",
+        "detroit red wings" to "Red Wings",
+        "edmonton oilers" to "Oilers",
+        "florida panthers" to "Panthers",
+        "los angeles kings" to "Kings",
+        "minnesota wild" to "Wild",
+        "montreal canadiens" to "Canadiens",
+        "montréal canadiens" to "Canadiens",
+        "nashville predators" to "Predators",
+        "new jersey devils" to "Devils",
+        "new york islanders" to "Islanders",
+        "new york rangers" to "Rangers",
+        "ottawa senators" to "Senators",
+        "philadelphia flyers" to "Flyers",
+        "pittsburgh penguins" to "Penguins",
+        "san jose sharks" to "Sharks",
+        "seattle kraken" to "Kraken",
+        "st. louis blues" to "Blues",
+        "st louis blues" to "Blues",
+        "tampa bay lightning" to "Lightning",
+        "toronto maple leafs" to "Maple Leafs",
+        "utah hockey club" to "Utah HC",
+        "utah mammoth" to "Mammoth",
+        "vancouver canucks" to "Canucks",
+        "vegas golden knights" to "Golden Knights",
+        "washington capitals" to "Capitals",
+        "winnipeg jets" to "Jets",
     )
     known[clean.lowercase(Locale.ROOT)]?.let { return it }
     if (clean.length <= 13) return clean
     val words = clean.split(WHITESPACE_SPLIT_REGEX).filter { it.isNotEmpty() }
+    val abbr = if (words.size >= 2 && words[0].length >= 4) {
+        "${words[0].first()}. ${words.drop(1).joinToString(" ")}"
+    } else null
     return when {
-        words.size >= 2 && words[0].length >= 4 -> "${words[0].first()}. ${words.drop(1).joinToString(" ")}".take(14)
-        else -> clean.take(14)
+        abbr != null && abbr.length <= 14 -> abbr
+        words.size >= 2 && words.last().length <= 14 -> words.last()
+        else -> {
+            val built = buildString {
+                for (w in words) {
+                    if (isEmpty()) append(w)
+                    else if (length + 1 + w.length <= 14) append(' ').append(w)
+                    else break
+                }
+            }
+            if (built.length <= 14) built else "${built.take(13)}…"
+        }
     }
 }
 
@@ -187,7 +236,7 @@ fun shortTeamName(fullName: String): String {
 fun tabularStyle(sizeSp: Float, weight: FontWeight = FontWeight.Bold, color: Color = AppTheme.tokens.colors.text): TextStyle {
     val scale = AppTheme.tokens.fontScale
     return TextStyle(
-        fontSize = (sizeSp * scale).sp,
+        fontSize = (sizeSp * scale).coerceAtLeast(11.5f).sp,
         fontWeight = weight,
         color = color,
         fontFeatureSettings = "tnum",
@@ -198,7 +247,9 @@ fun tabularStyle(sizeSp: Float, weight: FontWeight = FontWeight.Bold, color: Col
 fun scaledSp(baseSp: Float) = (baseSp * AppTheme.tokens.fontScale).coerceAtLeast(11.5f).sp
 
 fun formatLocalKickoff(kickoffIso: String): String = runCatching {
-    val instant = Instant.parse(kickoffIso)
+    val trimmed = kickoffIso.trim()
+    val instant = runCatching { OffsetDateTime.parse(trimmed).toInstant() }
+        .getOrElse { Instant.parse(trimmed) }
     instant.atZone(ZoneId.systemDefault()).format(LOCAL_KICKOFF_FORMATTER)
 }.getOrElse { kickoffIso.take(16).replace("T", " · ") }
 
@@ -255,7 +306,7 @@ fun TokenPill(
 
     Surface(
         modifier = modifier
-            .defaultMinSize(minHeight = 38.dp)
+            .defaultMinSize(minHeight = 48.dp)
             .semantics { this.selected = selected }
             .clickable(role = Role.Tab) {
                 if (t.config.haptics != HapticLevel.OFF) {
@@ -312,6 +363,7 @@ fun StatusBadge(
             fontSize = scaledSp(11f),
             fontWeight = FontWeight.ExtraBold,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
         )
     }
@@ -357,23 +409,29 @@ fun TeamAvatar(
         InitialsFallback()
     } else {
         val context = LocalContext.current
+        val isLightMode = AppTheme.tokens.config.mode.isLight
+        val emblemBg = if (isLightMode) Color(0xFFF1F5F9) else Color(0xFFEAF0F7)
+        val emblemBorder = if (isLightMode) c.border else Color.White.copy(alpha = 0.22f)
         Box(
             modifier = Modifier
                 .size(size)
                 .clip(CircleShape)
-                .background(c.surfaceRaised)
-                .border(1.dp, c.border, CircleShape),
+                .background(emblemBg)
+                .border(1.dp, emblemBorder, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            SubcomposeAsyncImage(
-                model = ImageRequest.Builder(context)
+            val imgRequest = remember(context, logoUrl) {
+                ImageRequest.Builder(context)
                     .data(logoUrl)
                     .crossfade(true)
-                    .build(),
+                    .build()
+            }
+            SubcomposeAsyncImage(
+                model = imgRequest,
                 imageLoader = context.imageLoader,
                 contentDescription = "$teamName logo",
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.size(size * 0.80f),
+                modifier = Modifier.size(size * 0.76f),
                 loading = { InitialsFallback() },
                 error = { InitialsFallback() },
             )
@@ -392,9 +450,12 @@ fun ProbBar(
 ) {
     val c = AppTheme.tokens.colors
     val hasDraw = drawProb != null && drawProb > 0.0
-    val sum = max(0.001, homeProb + awayProb + (drawProb ?: 0.0))
-    val hPct = ((homeProb / sum) * 100.0).roundToInt().coerceIn(1, 98)
-    val dPct = if (hasDraw) (((drawProb ?: 0.0) / sum) * 100.0).roundToInt().coerceIn(1, 98) else 0
+    val safeH = if (homeProb.isFinite()) homeProb.coerceAtLeast(0.0) else 0.5
+    val safeA = if (awayProb.isFinite()) awayProb.coerceAtLeast(0.0) else 0.5
+    val safeD = if (hasDraw && drawProb != null && drawProb.isFinite()) drawProb.coerceAtLeast(0.0) else 0.0
+    val sum = max(0.001, safeH + safeA + safeD)
+    val hPct = ((safeH / sum) * 100.0).roundToInt().coerceIn(1, if (hasDraw) 97 else 99)
+    val dPct = if (hasDraw) (((safeD / sum) * 100.0).roundToInt().coerceIn(1, (99 - hPct).coerceAtLeast(1))) else 0
     val aPct = (100 - hPct - dPct).coerceAtLeast(1)
 
     val a11yDesc = if (hasDraw) {
@@ -550,6 +611,7 @@ fun MetricTile(
     value: String,
     subtitle: String? = null,
     modifier: Modifier = Modifier,
+    subtitleColor: Color = AppTheme.tokens.colors.win,
 ) {
     val t = AppTheme.tokens
     Column(
@@ -563,7 +625,7 @@ fun MetricTile(
         Text(title, color = t.colors.textSecondary, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(value, style = tabularStyle(17f, FontWeight.ExtraBold, t.colors.text), maxLines = 1)
         if (!subtitle.isNullOrBlank()) {
-            Text(subtitle, color = t.colors.win, fontSize = scaledSp(11f), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = subtitleColor, fontSize = scaledSp(11f), fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
     }
 }

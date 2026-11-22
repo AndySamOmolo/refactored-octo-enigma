@@ -21,8 +21,8 @@ android {
         applicationId = "com.edgeledger.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 9).coerceAtLeast(9)
-        versionName = "8.0.0"
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 11).coerceAtLeast(11)
+        versionName = "8.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -121,14 +121,13 @@ dependencies {
 
     // Material 3 Home-Screen Widget (Jetpack Glance)
     implementation("androidx.glance:glance-appwidget:1.1.1")
-    implementation("androidx.glance:glance-material3:1.1.1")
 
     // Live Team Logo Rendering & Offline Disk Cache (PNG + SVG)
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil-svg:2.7.0")
 
     // Networking & JSON
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
@@ -138,6 +137,6 @@ dependencies {
 }
 
 // Prevent parallel KSP tasks (:kspDebugKotlin & :kspReleaseKotlin) from racing on Room's shared schema JSON
-tasks.matching { it.name == "kspReleaseKotlin" || it.name == "kspDebugUnitTestKotlin" }.configureEach {
+tasks.matching { it.name == "kspReleaseKotlin" || it.name == "kspDebugUnitTestKotlin" || it.name == "kspReleaseUnitTestKotlin" }.configureEach {
     mustRunAfter("kspDebugKotlin")
 }

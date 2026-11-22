@@ -10,12 +10,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -56,6 +66,7 @@ import java.util.Locale
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CompareScreen(app: EdgeLedgerApp) {
     val tokens = AppTheme.tokens
@@ -67,6 +78,8 @@ fun CompareScreen(app: EdgeLedgerApp) {
     val sport = runCatching { Sport.valueOf(sportName) }.getOrDefault(Sport.FOOTBALL)
     var homeIdx by rememberSaveable { mutableIntStateOf(0) }
     var awayIdx by rememberSaveable { mutableIntStateOf(1) }
+    var pickingSlot by rememberSaveable { mutableStateOf<String?>(null) }
+    var teamQuery by remember { mutableStateOf("") }
 
     var localBlend by remember(prefs.marketBlendWeight) { mutableFloatStateOf(prefs.marketBlendWeight.toFloat()) }
 
@@ -108,7 +121,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("Compare Any Two Teams", color = c.text, fontSize = scaledSp(20f), fontWeight = FontWeight.ExtraBold)
-                Text("Tap either team card to cycle matchups and predict all markets 100% offline.", color = c.textMuted, fontSize = scaledSp(13f))
+                Text("Tap either team card to pick any matchup and predict all markets 100% offline.", color = c.textMuted, fontSize = scaledSp(13f))
             }
         }
 
@@ -140,7 +153,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
                             border = BorderStroke(1.dp, c.border),
                             shape = tokens.shapes.card,
                             shadowElevation = tokens.elevationDp,
-                            modifier = Modifier.weight(1f).clickable { homeIdx = (hIdx + 1) % count },
+                            modifier = Modifier.weight(1f).clickable { teamQuery = ""; pickingSlot = "HOME" },
                         ) {
                             Column(
                                 modifier = Modifier.padding(14.dp),
@@ -148,8 +161,8 @@ fun CompareScreen(app: EdgeLedgerApp) {
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 TeamAvatar(home?.team ?: "Home", size = 44.dp, logoUrl = home?.logoUrl)
-                                Text("HOME · TAP", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
-                                Text(home?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                                Text("HOME · PICK", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
+                                Text(home?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                                 StatusBadge("Power ${home?.powerScore ?: 50}/99", c.accent, c.accentDim)
                             }
                         }
@@ -158,7 +171,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
                             border = BorderStroke(1.dp, c.border),
                             shape = tokens.shapes.card,
                             shadowElevation = tokens.elevationDp,
-                            modifier = Modifier.weight(1f).clickable { awayIdx = (aIdx + 1) % count },
+                            modifier = Modifier.weight(1f).clickable { teamQuery = ""; pickingSlot = "AWAY" },
                         ) {
                             Column(
                                 modifier = Modifier.padding(14.dp),
@@ -166,8 +179,8 @@ fun CompareScreen(app: EdgeLedgerApp) {
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 TeamAvatar(away?.team ?: "Away", size = 44.dp, logoUrl = away?.logoUrl)
-                                Text("AWAY · TAP", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
-                                Text(away?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                                Text("AWAY · PICK", color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.Bold)
+                                Text(away?.team ?: "No teams", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14f), maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
                                 StatusBadge("Power ${away?.powerScore ?: 50}/99", c.accent, c.accentDim)
                             }
                         }
@@ -288,6 +301,10 @@ fun CompareScreen(app: EdgeLedgerApp) {
             val oB = max(1.01, arbOddsB.toDoubleOrNull()?.takeIf { it.isFinite() } ?: 2.05)
             val totalS = max(1.0, arbStake.toDoubleOrNull()?.takeIf { it.isFinite() } ?: 100.0)
             val arb = OddsMath.calculateArbitrage(oA, oB, totalS)
+            val eqStakeA = totalS * (oB / (oA + oB))
+            val eqStakeB = totalS - eqStakeA
+            val eqReturn = eqStakeA * oA
+            val eqProfit = eqReturn - totalS
 
             SectionCard {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -304,12 +321,96 @@ fun CompareScreen(app: EdgeLedgerApp) {
                     OutlinedTextField(value = arbStake, onValueChange = { arbStake = it }, label = { Text("Stake ($)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
                 }
                 Text(
-                    "Split: $${String.format(Locale.US, "%.2f", arb.stakeA)} on Side A · $${String.format(Locale.US, "%.2f", arb.stakeB)} on Side B → Return $${String.format(Locale.US, "%.2f", arb.guaranteedPayout)} (${if (arb.guaranteedProfit >= 0) "+" else ""}$${String.format(Locale.US, "%.2f", arb.guaranteedProfit)})",
+                    "Equalized split: $${String.format(Locale.US, "%.2f", eqStakeA)} on A · $${String.format(Locale.US, "%.2f", eqStakeB)} on B → Est. Return $${String.format(Locale.US, "%.2f", eqReturn)} (${if (eqProfit >= 0) "+" else "-"}$${String.format(Locale.US, "%.2f", kotlin.math.abs(eqProfit))})",
                     style = tabularStyle(12.5f, FontWeight.Bold, if (arb.isArbitrage) c.win else c.textSecondary),
                 )
             }
         }
 
         item { Spacer(Modifier.height(88.dp)) }
+    }
+
+    if (pickingSlot != null) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val filteredTeams = remember(teams, teamQuery) {
+            val q = teamQuery.trim()
+            teams.mapIndexedNotNull { idx, tp ->
+                if (q.isEmpty() || tp.team.contains(q, ignoreCase = true)) idx to tp else null
+            }
+        }
+        ModalBottomSheet(
+            onDismissRequest = { pickingSlot = null },
+            sheetState = sheetState,
+            containerColor = c.surface,
+            contentColor = c.text,
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "Select ${if (pickingSlot == "HOME") "Home" else "Away"} Team (${sport.label})",
+                    color = c.text,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = scaledSp(16f),
+                )
+                OutlinedTextField(
+                    value = teamQuery,
+                    onValueChange = { teamQuery = it },
+                    placeholder = { Text("Search teams…") },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, tint = c.textMuted) },
+                    trailingIcon = if (teamQuery.isNotEmpty()) {
+                        {
+                            IconButton(onClick = { teamQuery = "" }) {
+                                Icon(Icons.Outlined.Close, contentDescription = "Clear search", tint = c.textMuted)
+                            }
+                        }
+                    } else null,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    items(filteredTeams, key = { (_, tp) -> tp.team }) { (idx, tp) ->
+                        val isCurrent = (pickingSlot == "HOME" && idx == hIdx) || (pickingSlot == "AWAY" && idx == aIdx)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (pickingSlot == "HOME") {
+                                        if (idx == aIdx) awayIdx = hIdx
+                                        homeIdx = idx
+                                    } else {
+                                        if (idx == hIdx) homeIdx = aIdx
+                                        awayIdx = idx
+                                    }
+                                    pickingSlot = null
+                                }
+                                .padding(vertical = 10.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            TeamAvatar(tp.team, size = 34.dp, logoUrl = tp.logoUrl)
+                            Text(
+                                tp.team,
+                                color = if (isCurrent) c.accent else c.text,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = scaledSp(14f),
+                                modifier = Modifier.weight(1f),
+                            )
+                            StatusBadge(
+                                "Power ${tp.powerScore}/99",
+                                if (isCurrent) c.accent else c.textSecondary,
+                                if (isCurrent) c.accentDim else c.surfaceRaised,
+                            )
+                        }
+                        HorizontalDivider(color = c.border.copy(alpha = 0.5f))
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+            }
+        }
     }
 }

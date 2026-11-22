@@ -13,7 +13,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,6 +36,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.edgeledger.app.EdgeLedgerApp
 import com.edgeledger.app.data.PersonalBetEntity
 import com.edgeledger.app.engine.OddsMath
+import com.edgeledger.app.model.Sport
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.ui.components.MetricTile
 import com.edgeledger.app.ui.components.SectionCard
@@ -42,7 +47,9 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.time.Instant
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.roundToInt
 
 @Serializable
@@ -93,6 +100,10 @@ fun PicksScreen(app: EdgeLedgerApp) {
     val allBets by app.database.dao().observePersonalBets().collectAsStateWithLifecycle(initialValue = emptyList())
 
     val isPaper = prefs.isPaperTrading
+    var showLogDialog by remember { mutableStateOf(false) }
+    var showResetPaperConfirm by remember { mutableStateOf(false) }
+    var cashOutTarget by remember { mutableStateOf<PersonalBetEntity?>(null) }
+    var deleteTarget by remember { mutableStateOf<PersonalBetEntity?>(null) }
     val bets = remember(allBets, isPaper) { allBets.filter { it.isPaper == isPaper } }
     val baseBalance = if (isPaper) prefs.paperBankroll else prefs.bankroll
 
@@ -141,7 +152,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
             putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Picks Backup (CSV)")
             putExtra(Intent.EXTRA_TEXT, header + body)
         }
-        context.startActivity(Intent.createChooser(shareIntent, "Export Picks CSV"))
+        runCatching { context.startActivity(Intent.createChooser(shareIntent, "Export Picks CSV")) }
     }
 
     fun exportJson() {
@@ -167,7 +178,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
             putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Picks Backup (JSON)")
             putExtra(Intent.EXTRA_TEXT, exportJsonCodec.encodeToString(dtos))
         }
-        context.startActivity(Intent.createChooser(shareIntent, "Export Picks JSON"))
+        runCatching { context.startActivity(Intent.createChooser(shareIntent, "Export Picks JSON")) }
     }
 
     LazyColumn(
@@ -206,7 +217,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
                 MetricTile(if (isPaper) "Paper Bal" else "Balance", "$${(baseBalance + netPnl).roundToInt()}", null, Modifier.weight(1f))
                 MetricTile(
                     "Total Profit",
-                    "${if (netPnl >= 0) "+" else ""}$${netPnl.roundToInt()}",
+                    if (netPnl >= 0) "+$${netPnl.roundToInt()}" else "-$${kotlin.math.abs(netPnl.roundToInt())}",
                     avgClv?.let { "CLV ${if (it >= 0) "+" else ""}${String.format(Locale.US, "%.1f", it)}%" },
                     Modifier.weight(1f),
                 )
@@ -215,15 +226,32 @@ fun PicksScreen(app: EdgeLedgerApp) {
         }
 
         item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("${if (isPaper) "Paper" else "Real"} Ledger (${bets.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15.5f))
-                if (bets.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("${if (isPaper) "Paper" else "Real"} Ledger (${bets.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15.5f))
+                    Button(
+                        onClick = { showLogDialog = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+                        shape = tokens.shapes.button,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Text("+ Log Pick", fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(11.5f))
+                    }
+                }
+                if (bets.isNotEmpty() || isPaper) {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        OutlinedButton(onClick = { exportCsv() }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
-                            Text("CSV", color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(11.5f))
+                        if (bets.isNotEmpty()) {
+                            OutlinedButton(onClick = { exportCsv() }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                                Text("Export CSV", color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(11.5f))
+                            }
+                            OutlinedButton(onClick = { exportJson() }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                                Text("Export JSON", color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(11.5f))
+                            }
                         }
-                        OutlinedButton(onClick = { exportJson() }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
-                            Text("JSON", color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(11.5f))
+                        if (isPaper) {
+                            OutlinedButton(onClick = { showResetPaperConfirm = true }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                                Text("Reset Paper", color = c.loss, fontWeight = FontWeight.Bold, fontSize = scaledSp(11.5f))
+                            }
                         }
                     }
                 }
@@ -261,6 +289,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
                         val (stColor, stDim) = when (bet.status) {
                             "WON", "HALF_WIN" -> c.win to c.winDim
                             "LOST", "HALF_LOSS" -> c.loss to c.lossDim
+                            "CASH_OUT" -> c.accent to c.accentDim
                             "PUSH", "VOID" -> c.textSecondary to c.surfaceRaised
                             else -> c.pending to c.pendingDim
                         }
@@ -305,12 +334,17 @@ fun PicksScreen(app: EdgeLedgerApp) {
                             "HALF_LOSS" to "½ Loss",
                             "VOID" to "Void",
                             "CASH_OUT" to "Cash-Out",
+                            "PENDING" to "Pending",
                         )
                         items(states, key = { it.first }) { (code, lbl) ->
                             OutlinedButton(
                                 onClick = {
-                                    val pnl = computeSettlementPnl(bet, code)
-                                    scope.launch { app.database.dao().updateBetStatus(bet.id, code, pnl) }
+                                    if (code == "CASH_OUT") {
+                                        cashOutTarget = bet
+                                    } else {
+                                        val pnl = computeSettlementPnl(bet, code)
+                                        app.appScope.launch { app.database.dao().updateBetStatus(bet.id, code, pnl) }
+                                    }
                                 },
                                 shape = tokens.shapes.button,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
@@ -318,7 +352,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
                         }
                         item(key = "remove") {
                             OutlinedButton(
-                                onClick = { scope.launch { app.database.dao().deleteBet(bet.id) } },
+                                onClick = { deleteTarget = bet },
                                 shape = tokens.shapes.button,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                             ) { Text("Remove", fontSize = scaledSp(11f), color = c.textMuted) }
@@ -329,5 +363,150 @@ fun PicksScreen(app: EdgeLedgerApp) {
         }
 
         item { Spacer(Modifier.height(88.dp)) }
+    }
+
+    if (showResetPaperConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetPaperConfirm = false },
+            title = { Text("Reset Paper Bankroll?") },
+            text = { Text("This deletes all ${bets.size} paper-trading picks and resets your paper balance to $1,000.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val paperIds = bets.map { it.id }
+                        scope.launch { paperIds.forEach { app.database.dao().deleteBet(it) } }
+                        app.prefsRepo.updatePrefs { it.copy(paperBankroll = 1000.0) }
+                        showResetPaperConfirm = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = c.loss, contentColor = c.onLoss),
+                ) { Text("Reset") }
+            },
+            dismissButton = { TextButton(onClick = { showResetPaperConfirm = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (showLogDialog) {
+        var pickSport by remember { mutableStateOf(Sport.FOOTBALL) }
+        var matchupInput by remember { mutableStateOf("") }
+        var selectionInput by remember { mutableStateOf("") }
+        var oddsInput by remember { mutableStateOf("2.00") }
+        var stakeInput by remember { mutableStateOf("25") }
+        var bookmakerInput by remember { mutableStateOf("Manual") }
+
+        val parsedOdds = oddsInput.toDoubleOrNull()?.takeIf { it.isFinite() && it > 1.0 }
+        val parsedStake = stakeInput.toDoubleOrNull()?.takeIf { it.isFinite() && it > 0.0 }
+        val canSave = matchupInput.isNotBlank() && selectionInput.isNotBlank() && parsedOdds != null && parsedStake != null
+
+        AlertDialog(
+            onDismissRequest = { showLogDialog = false },
+            title = { Text("Log ${if (isPaper) "Paper" else "Real"} Pick") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(Sport.entries, key = { it.name }) { sp ->
+                            TokenPill(sp.shortCode, pickSport == sp, { pickSport = sp })
+                        }
+                    }
+                    OutlinedTextField(value = matchupInput, onValueChange = { matchupInput = it }, label = { Text("Matchup (e.g. Arsenal vs Chelsea)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = selectionInput, onValueChange = { selectionInput = it }, label = { Text("Pick (e.g. Arsenal -0.5)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(value = oddsInput, onValueChange = { oddsInput = it }, label = { Text("Decimal Odds") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = stakeInput, onValueChange = { stakeInput = it }, label = { Text("Stake ($)") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.weight(1f))
+                    }
+                    OutlinedTextField(value = bookmakerInput, onValueChange = { bookmakerInput = it }, label = { Text("Bookmaker") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = canSave,
+                    onClick = {
+                        val now = Instant.now()
+                        val odds = parsedOdds ?: return@Button
+                        val stake = parsedStake ?: return@Button
+                        scope.launch {
+                            app.database.dao().upsertBet(
+                                PersonalBetEntity(
+                                    id = "manual-${UUID.randomUUID()}",
+                                    createdAtIso = now.toString(),
+                                    fixtureId = null,
+                                    sport = pickSport.label,
+                                    leagueName = pickSport.label,
+                                    matchup = matchupInput.trim(),
+                                    selection = selectionInput.trim(),
+                                    decimalOdds = odds,
+                                    closingOdds = null,
+                                    modelProb = (1.0 / odds).coerceIn(0.01, 0.99),
+                                    stakeAmount = stake,
+                                    status = "PENDING",
+                                    notes = "",
+                                    isPaper = isPaper,
+                                    bookmaker = bookmakerInput.trim().ifBlank { "Manual" },
+                                    settledPnl = null,
+                                    createdAtEpochMs = now.toEpochMilli(),
+                                )
+                            )
+                        }
+                        showLogDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+                ) { Text("Save Pick") }
+            },
+            dismissButton = { TextButton(onClick = { showLogDialog = false }) { Text("Cancel") } },
+        )
+    }
+
+    cashOutTarget?.let { target ->
+        var payoutStr by remember(target.id) {
+            val initial = (target.stakeAmount + (target.settledPnl ?: 0.0)).coerceAtLeast(0.0)
+            mutableStateOf(String.format(Locale.US, "%.2f", initial))
+        }
+        val parsedPayout = payoutStr.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+        AlertDialog(
+            onDismissRequest = { cashOutTarget = null },
+            title = { Text("Record Cash-Out Payout") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Stake was $${String.format(Locale.US, "%.2f", target.stakeAmount)}. Enter total amount returned:", fontSize = scaledSp(12.5f))
+                    OutlinedTextField(
+                        value = payoutStr,
+                        onValueChange = { payoutStr = it },
+                        label = { Text("Total Cash-Out Returned ($)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = parsedPayout != null,
+                    onClick = {
+                        val net = (parsedPayout ?: 0.0) - target.stakeAmount
+                        app.appScope.launch { app.database.dao().updateBetStatus(target.id, "CASH_OUT", net) }
+                        cashOutTarget = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+                ) { Text("Save Cash-Out") }
+            },
+            dismissButton = { TextButton(onClick = { cashOutTarget = null }) { Text("Cancel") } },
+        )
+    }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Remove Pick?") },
+            text = { Text("Permanently remove \"${target.selection}\" from your ledger?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        app.appScope.launch { app.database.dao().deleteBet(target.id) }
+                        deleteTarget = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = c.loss, contentColor = c.onLoss),
+                ) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
+        )
     }
 }

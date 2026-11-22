@@ -26,18 +26,31 @@ import com.edgeledger.app.MainActivity
 import com.edgeledger.app.data.AppDatabase
 import com.edgeledger.app.data.SyncRepository
 import com.edgeledger.app.ui.components.shortTeamName
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import java.time.Instant
+import java.time.OffsetDateTime
 import kotlinx.coroutines.withContext
 
 class TopPicksWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val snap = withContext(Dispatchers.IO) {
-            runCatching {
+            try {
                 SyncRepository.readSnapshotFromDisk(context, AppDatabase.getInstance(context))
-            }.getOrNull()
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                null
+            }
         }
-        val topRows = snap?.fixtures?.take(3)?.map { fx ->
+        val nowMs = System.currentTimeMillis()
+        val upcoming = snap?.fixtures?.filter { fx ->
+            val ts = runCatching { OffsetDateTime.parse(fx.kickoffIso.trim()).toInstant().toEpochMilli() }
+                .getOrElse { runCatching { Instant.parse(fx.kickoffIso.trim()).toEpochMilli() }.getOrNull() }
+            ts == null || ts >= nowMs - 2L * 3600L * 1000L
+        }?.sortedByDescending { it.markets.topPicks.firstOrNull()?.chancePct ?: 0 }
+        val topRows = upcoming?.take(3)?.map { fx ->
             val pick = fx.markets.topPicks.firstOrNull()
             val home = shortTeamName(fx.homeTeam)
             val away = shortTeamName(fx.awayTeam)

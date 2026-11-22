@@ -57,6 +57,7 @@ class WeeklySyncWorker(
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
                 .setRequiresBatteryNotLow(true)
+                .setRequiresStorageNotLow(true)
                 .build()
             val req = PeriodicWorkRequestBuilder<WeeklySyncWorker>(7, TimeUnit.DAYS)
                 .setConstraints(constraints)
@@ -64,7 +65,7 @@ class WeeklySyncWorker(
                 .build()
             wm.enqueueUniquePeriodicWork(
                 WORK_NAME,
-                ExistingPeriodicWorkPolicy.UPDATE,
+                if (replaceExisting) ExistingPeriodicWorkPolicy.UPDATE else ExistingPeriodicWorkPolicy.KEEP,
                 req,
             )
         }

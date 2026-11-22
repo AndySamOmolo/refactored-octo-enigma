@@ -74,11 +74,33 @@ class OptionalOddsAndDataClient(
         coerceInputValues = true
     }
 
+    private val authClient: OkHttpClient = client.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+
     private val callsByProvider = ConcurrentHashMap<String, AtomicInteger>()
     private val statusByProvider = ConcurrentHashMap<String, String>()
 
     private fun sanitizeKey(raw: String): String =
-        raw.trim().filter { it in ' '..'~' }
+        raw.trim().filter { it in '!'..'~' }
+
+    private fun readBoundedBody(response: okhttp3.Response, maxBytes: Int = 5 * 1024 * 1024): String {
+        val stream = response.body?.byteStream() ?: return ""
+        val baos = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        var total = 0
+        stream.use { input ->
+            while (true) {
+                val r = input.read(buf)
+                if (r <= 0) break
+                total += r
+                if (total > maxBytes) throw IOException("Response exceeds size limit")
+                baos.write(buf, 0, r)
+            }
+        }
+        return baos.toString(Charsets.UTF_8.name())
+    }
 
     fun fetchTheOddsApi(
         sportKey: String,
@@ -103,7 +125,6 @@ class OptionalOddsAndDataClient(
                 .newBuilder()
                 .addPathSegment(cleanSport)
                 .addPathSegment("odds")
-                .addPathSegment("")
                 .addQueryParameter("apiKey", cleanKey)
                 .addQueryParameter("regions", "eu,us")
                 .addQueryParameter("markets", "h2h")
@@ -117,7 +138,7 @@ class OptionalOddsAndDataClient(
                 .build()
 
             incrementCalls(PROVIDER_THE_ODDS_API)
-            client.newCall(request).execute().use { response ->
+            authClient.newCall(request).execute().use { response ->
                 val remaining = response.header("x-requests-remaining")
                 val usedHeader = response.header("x-requests-used")?.toIntOrNull()
                 if (usedHeader != null) {
@@ -132,7 +153,7 @@ class OptionalOddsAndDataClient(
                     return emptyMap()
                 }
 
-                val body = response.body?.string().orEmpty()
+                val body = readBoundedBody(response)
                 if (body.isBlank()) {
                     setStatus(PROVIDER_THE_ODDS_API, "Empty response")
                     return emptyMap()
@@ -248,13 +269,13 @@ class OptionalOddsAndDataClient(
                 .build()
 
             incrementCalls(PROVIDER_FOOTBALL_DATA)
-            client.newCall(request).execute().use { response ->
+            authClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     setStatus(PROVIDER_FOOTBALL_DATA, "HTTP ${response.code}")
                     return emptyList()
                 }
 
-                val body = response.body?.string().orEmpty()
+                val body = readBoundedBody(response)
                 if (body.isBlank()) {
                     setStatus(PROVIDER_FOOTBALL_DATA, "Empty response")
                     return emptyList()
@@ -327,53 +348,68 @@ class OptionalOddsAndDataClient(
 
     fun fetchPolymarketOdds(): List<Pair<String, Double>> {
         return try {
-            val request = Request.Builder()
-                .url("https://gamma-api.polymarket.com/markets?closed=false&limit=60")
-                .header("Accept", "application/json")
-                .get()
-                .build()
-
-            incrementCalls(PROVIDER_POLYMARKET)
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    setStatus(PROVIDER_POLYMARKET, "HTTP ${response.code}")
-                    return emptyList()
-                }
-
-                val body = response.body?.string().orEmpty()
-                if (body.isBlank()) {
-                    setStatus(PROVIDER_POLYMARKET, "Empty response")
-                    return emptyList()
-                }
-
-                val markets = json.parseToJsonElement(body) as? JsonArray ?: run {
-                    setStatus(PROVIDER_POLYMARKET, "Unexpected JSON payload")
-                    return emptyList()
-                }
-
-                val pairs = mutableListOf<Pair<String, Double>>()
-                for (marketElem in markets) {
-                    val marketObj = marketElem as? JsonObject ?: continue
-                    val question = marketObj.stringOrNull("question")?.trim().orEmpty()
-                    if (question.isBlank() || !isSportsMarketQuestion(question)) continue
-
-                    val yesProb = extractPolymarketYesProbability(marketObj) ?: continue
-                    if (yesProb.isFinite() && yesProb in 0.01..0.99) {
-                        pairs.add(question to yesProb)
-                    }
-                }
-
-                setStatus(PROVIDER_POLYMARKET, "OK (${pairs.size} sports markets)")
-                pairs
-            }
+            val primaryUrl =
+                "https://gamma-api.polymarket.com/markets?active=true&closed=false&order=volume24hr&ascending=false&limit=100"
+            val fallbackUrl =
+                "https://gamma-api.polymarket.com/markets?active=true&closed=false&tag=sports&order=volume24hr&ascending=false&limit=100"
+            val primary = fetchPolymarketUrl(primaryUrl, requireSportsKeyword = true) ?: return emptyList()
+            val resolved = if (primary.isNotEmpty()) {
+                primary
+            } else {
+                fetchPolymarketUrl(fallbackUrl, requireSportsKeyword = false).orEmpty()
+            }.distinctBy { it.first.lowercase(Locale.US) }
+            setStatus(PROVIDER_POLYMARKET, "OK (${resolved.size} sports markets)")
+            resolved
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: IOException) {
-            setStatus(PROVIDER_POLYMARKET, "Network error: ${sanitizeError(e)}")
+            setStatus(PROVIDER_POLYMARKET, SyncRepository.friendlyNetworkError(e))
             emptyList()
         } catch (e: Exception) {
             setStatus(PROVIDER_POLYMARKET, "Parse error: ${sanitizeError(e)}")
             emptyList()
+        }
+    }
+
+    private fun fetchPolymarketUrl(url: String, requireSportsKeyword: Boolean): List<Pair<String, Double>>? {
+        val request = Request.Builder()
+            .url(url)
+            .header("Accept", "application/json")
+            .get()
+            .build()
+        incrementCalls(PROVIDER_POLYMARKET)
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                setStatus(PROVIDER_POLYMARKET, "HTTP ${response.code}")
+                return null
+            }
+            val body = readBoundedBody(response)
+            if (body.isBlank()) {
+                setStatus(PROVIDER_POLYMARKET, "Empty response")
+                return null
+            }
+            val markets = json.parseToJsonElement(body) as? JsonArray ?: run {
+                setStatus(PROVIDER_POLYMARKET, "Unexpected JSON payload")
+                return null
+            }
+            val pairs = mutableListOf<Pair<String, Double>>()
+            for (marketElem in markets) {
+                val marketObj = marketElem as? JsonObject ?: continue
+                val question = marketObj.stringOrNull("question")?.trim().orEmpty()
+                if (question.isBlank()) continue
+                val meta = listOfNotNull(
+                    marketObj.stringOrNull("category"),
+                    marketObj.stringOrNull("slug"),
+                    marketObj.stringOrNull("groupItemTitle"),
+                ).joinToString(" ")
+                val ok = if (requireSportsKeyword) isSportsMarketQuestion(question, meta) else !isBlockedNonSportsMarket(question)
+                if (!ok) continue
+                val yesProb = extractPolymarketYesProbability(marketObj) ?: continue
+                if (yesProb.isFinite() && yesProb in 0.01..0.99) {
+                    pairs.add(question to yesProb)
+                }
+            }
+            return pairs
         }
     }
 
@@ -399,13 +435,13 @@ class OptionalOddsAndDataClient(
                 .build()
 
             incrementCalls(PROVIDER_CRICKET_DATA)
-            client.newCall(request).execute().use { response ->
+            authClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     setStatus(PROVIDER_CRICKET_DATA, "HTTP ${response.code}")
                     return emptyList()
                 }
 
-                val body = response.body?.string().orEmpty()
+                val body = readBoundedBody(response)
                 if (body.isBlank()) {
                     setStatus(PROVIDER_CRICKET_DATA, "Empty response")
                     return emptyList()
@@ -481,7 +517,7 @@ class OptionalOddsAndDataClient(
     fun fetchKalshiOdds(): List<Pair<String, Double>> {
         return try {
             val request = Request.Builder()
-                .url("https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=60")
+                .url("https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=200")
                 .header("Accept", "application/json")
                 .get()
                 .build()
@@ -493,7 +529,7 @@ class OptionalOddsAndDataClient(
                     return emptyList()
                 }
 
-                val body = response.body?.string().orEmpty()
+                val body = readBoundedBody(response)
                 if (body.isBlank()) {
                     setStatus(PROVIDER_KALSHI, "Empty response")
                     return emptyList()
@@ -514,7 +550,14 @@ class OptionalOddsAndDataClient(
                     val marketObj = marketElem as? JsonObject ?: continue
                     val title = marketObj.stringOrNull("title")?.takeIf { it.isNotBlank() }
                         ?: marketObj.stringOrNull("ticker").orEmpty()
-                    if (title.isBlank() || !isSportsMarketQuestion(title)) continue
+                    if (title.isBlank()) continue
+                    val meta = listOfNotNull(
+                        marketObj.stringOrNull("category"),
+                        marketObj.stringOrNull("event_ticker"),
+                        marketObj.stringOrNull("series_ticker"),
+                        marketObj.stringOrNull("subtitle"),
+                    ).joinToString(" ")
+                    if (!isSportsMarketQuestion(title, meta)) continue
 
                     val yesProb = extractKalshiYesProbability(marketObj) ?: continue
                     if (yesProb.isFinite() && yesProb in 0.01..0.99) {
@@ -557,13 +600,13 @@ class OptionalOddsAndDataClient(
                 .build()
 
             incrementCalls(PROVIDER_ODDSPAPI)
-            client.newCall(request).execute().use { response ->
+            authClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     setStatus(PROVIDER_ODDSPAPI, "HTTP ${response.code}")
                     return emptyList()
                 }
 
-                val body = response.body?.string().orEmpty()
+                val body = readBoundedBody(response)
                 if (body.isBlank()) {
                     setStatus(PROVIDER_ODDSPAPI, "Empty response")
                     return emptyList()
@@ -604,7 +647,7 @@ class OptionalOddsAndDataClient(
         }
 
         val parsedUrl = endpointUrl.toHttpUrlOrNull()
-        if (parsedUrl == null || parsedUrl.scheme != "https" || !parsedUrl.host.endsWith(".api-sports.io")) {
+        if (parsedUrl == null || parsedUrl.scheme != "https" || parsedUrl.port != 443 || parsedUrl.username.isNotEmpty() || parsedUrl.password.isNotEmpty() || !parsedUrl.host.endsWith(".api-sports.io")) {
             setStatus(PROVIDER_API_SPORTS, "Blocked: untrusted endpoint")
             return null
         }
@@ -618,13 +661,13 @@ class OptionalOddsAndDataClient(
                 .build()
 
             incrementCalls(PROVIDER_API_SPORTS)
-            client.newCall(request).execute().use { response ->
+            authClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     setStatus(PROVIDER_API_SPORTS, "HTTP ${response.code}")
                     return null
                 }
 
-                val body = response.body?.string().orEmpty()
+                val body = readBoundedBody(response)
                 if (body.isBlank()) {
                     setStatus(PROVIDER_API_SPORTS, "Empty response")
                     return null
@@ -753,22 +796,22 @@ class OptionalOddsAndDataClient(
     private fun normalizeMatchKey(home: String, away: String): String =
         "${home.trim().lowercase(Locale.US).replace(WHITESPACE_REGEX, " ")}::${away.trim().lowercase(Locale.US).replace(WHITESPACE_REGEX, " ")}"
 
-    internal fun isSportsMarketQuestion(question: String): Boolean {
+    private fun isBlockedNonSportsMarket(question: String): Boolean {
         val q = question.lowercase(Locale.US)
         val blocked = listOf(
             "trump", "biden", "xi jinping", "democrat", "republican", "election", "president",
             "senate", "congress", "governor", "nominee", "primary", "fed ", "interest rate",
             "tariff", "bitcoin", "btc", "ethereum", "crypto", "inflation", "recession", "ukraine",
             "china", "israel", "gaza", "nato", "supreme court", "cabinet", "pardon", "oscar", "grammy",
+            "cpi", "gdp", "unemployment", "s&p", "nasdaq", "box office", "temperature",
         )
-        if (blocked.any { it in q }) return false
-        val allowed = listOf(
-            "nba", "nfl", "nhl", "mlb", "premier league", "champions league", "la liga", "bundesliga",
-            "serie a", "ligue 1", "world cup", "super bowl", "stanley cup", "world series",
-            "ufc", "mma", "formula 1", "f1", "grand prix", "atp", "wta", "wimbledon", "us open",
-            "cricket", "ipl", " vs ", " vs. ", "beat ", "playoffs", "mvp", "fc ", "united", "city",
-        )
-        return allowed.any { it in q }
+        return blocked.any { it in q }
+    }
+
+    internal fun isSportsMarketQuestion(question: String, extraMeta: String = ""): Boolean {
+        if (isBlockedNonSportsMarket(question)) return false
+        val combined = "$question $extraMeta".lowercase(Locale.US)
+        return SPORTS_KEYWORD_REGEX.containsMatchIn(combined)
     }
 
     internal fun sanitizeError(e: Throwable): String {
@@ -825,6 +868,7 @@ class OptionalOddsAndDataClient(
         )
 
         private val WHITESPACE_REGEX = Regex("\\s+")
-        private val SECRET_QUERY_REGEX = Regex("(?i)(apiKey|apikey|token|key)=[^&\\s]+")
+        private val SECRET_QUERY_REGEX = Regex("(?i)(apiKey|apikey|token|key)(=|%3D)[^&\\s]+")
+        private val SPORTS_KEYWORD_REGEX = Regex("\\b(nba|nfl|nhl|mlb|wnba|mls|ncaa|march madness|premier league|champions league|europa league|fa cup|la liga|bundesliga|serie a|ligue 1|world cup|super bowl|stanley cup|world series|nba finals|ufc|mma|boxing|formula 1|grand prix|atp|wta|wimbledon|us open|pga|golf|rugby|cricket|ipl|kxnfl|kxnba|kxnhl|kxmlb|kxepl|kxucl|kxufc|kxatp|kxf1|kxsoccer|playoffs|touchdown|home run)\\b")
     }
 }

@@ -23,6 +23,7 @@ typealias StakingMode = com.edgeledger.app.model.StakingMode
 object StatsMath {
     /** Abramowitz & Stegun 7.1.26 approximation of erf(x) (max error < 1.5e-7). */
     fun erf(x: Double): Double {
+        if (x.isNaN()) return 0.0
         if (!x.isFinite()) return if (x > 0) 1.0 else -1.0
         val sign = if (x < 0.0) -1.0 else 1.0
         val ax = abs(x)
@@ -32,6 +33,7 @@ object StatsMath {
     }
 
     fun normalCdf(z: Double): Double {
+        if (z.isNaN()) return 0.5
         if (!z.isFinite()) return if (z > 0) 1.0 else 0.0
         return 0.5 * (1.0 + erf(z / sqrt(2.0)))
     }
@@ -103,6 +105,9 @@ object StatsMath {
         val safeL = max(0.01, mean)
         val maxU = floor(line).toInt()
         if (maxU < 0) return 0.99
+        if (safeL > 100.0) {
+            return (1.0 - normalCdf(maxU + 0.5, safeL, sqrt(safeL))).coerceIn(0.01, 0.99)
+        }
         var term = exp(-safeL)
         var under = term
         for (k in 1..maxU) {
@@ -117,6 +122,9 @@ object StatsMath {
     fun poissonQuantile(mean: Double, q: Double): Int {
         if (!mean.isFinite() || mean <= 0.0) return 0
         val target = q.coerceIn(0.001, 0.999)
+        if (mean > 100.0) {
+            return max(0, (mean + normalInvCdf(target) * sqrt(mean)).roundToInt())
+        }
         var term = exp(-mean)
         var cdf = term
         var k = 0
@@ -342,9 +350,10 @@ object OddsMath {
         val safeH = if (probHome.isFinite()) probHome.coerceIn(0.0, 1.0) else 0.0
         val safeA = if (probAway.isFinite()) probAway.coerceIn(0.0, 1.0) else 0.0
         val safeD = if (probDraw.isFinite()) probDraw.coerceIn(0.0, 1.0) else 0.0
+        val isTwoWayDnb = oddsDraw == null && safeD > 0.0
         val twoWaySum = safeH + safeA
-        val effHomeProb = if (!hasDrawOdds && safeD > 0.0 && twoWaySum > EPSILON) safeH / twoWaySum else safeH
-        val effAwayProb = if (!hasDrawOdds && safeD > 0.0 && twoWaySum > EPSILON) safeA / twoWaySum else safeA
+        val effHomeProb = if (isTwoWayDnb && twoWaySum > EPSILON) safeH / twoWaySum else safeH
+        val effAwayProb = if (isTwoWayDnb && twoWaySum > EPSILON) safeA / twoWaySum else safeA
 
         fun evalSide(
             label: String,

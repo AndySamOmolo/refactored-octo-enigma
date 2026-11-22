@@ -101,9 +101,16 @@ object PlayerPropsEngine {
         val weightSum = rawWeights.sum().coerceAtLeast(1.0)
         val topSharePool = (teamXg * 0.62).coerceAtMost(teamXg)
 
+        val maxSingleXg = max(0.02, teamXg * 0.45)
+        val minSingleXg = min(0.08, maxSingleXg * 0.35)
+        val rawPlayerXgs = ranked.indices.map { idx ->
+            (topSharePool * (rawWeights[idx] / weightSum)).coerceIn(minSingleXg, maxSingleXg)
+        }
+        val xgScale = if (rawPlayerXgs.sum() > topSharePool && rawPlayerXgs.sum() > 0.0) topSharePool / rawPlayerXgs.sum() else 1.0
+
         val out = mutableListOf<PlayerPropPrediction>()
         ranked.forEachIndexed { idx, p ->
-            val playerXg = (topSharePool * (rawWeights[idx] / weightSum)).coerceIn(0.08, teamXg * 0.45)
+            val playerXg = max(0.01, rawPlayerXgs[idx] * xgScale)
             val anytimePct = (StatsMath.poissonOverProb(playerXg, 0.5) * 100.0).roundToInt().coerceIn(5, 85)
             val low = StatsMath.poissonQuantile(playerXg, 0.15).toDouble()
             val high = max(low + 1.0, StatsMath.poissonQuantile(playerXg, 0.85).toDouble())
@@ -155,7 +162,7 @@ object PlayerPropsEngine {
                 )
             }
             if (idx == 1) {
-                val assistMean = min(playerXg * 0.72, teamXg * 0.28).coerceIn(0.06, min(0.85, teamXg * 0.65))
+                val maxAssist = max(0.02, min(0.85, teamXg * 0.65)); val assistMean = min(playerXg * 0.72, teamXg * 0.28).coerceIn(min(0.06, maxAssist * 0.5), maxAssist)
                 val assistPct = (StatsMath.poissonOverProb(assistMean, 0.5) * 100.0).roundToInt().coerceIn(5, 65)
                 out.add(
                     PlayerPropPrediction(
@@ -206,16 +213,25 @@ object PlayerPropsEngine {
         fxPrefix: String,
         sideTag: String,
     ): List<PlayerPropPrediction> {
-        val leaders = players.sortedByDescending { it.statValue?.takeIf { v -> v.isFinite() } ?: 0.0 }.take(3)
+        val leaders = players.sortedByDescending { p ->
+            val isPts = p.statCategory.isBlank() || p.statCategory.contains("point", ignoreCase = true)
+            val v = p.statValue?.takeIf { it.isFinite() } ?: 0.0
+            (if (isPts) 1000.0 else 0.0) + v
+        }.take(3)
         val shares = listOf(0.23, 0.18, 0.14)
-        return leaders.mapIndexed { idx, p ->
+        val rawMeans = leaders.mapIndexed { idx, p ->
             val rawStat = p.statValue?.takeIf { it.isFinite() && it in 4.0..48.0 }
             val isPointsCat = p.statCategory.isBlank() || p.statCategory.contains("point", ignoreCase = true)
-            val mean = if (rawStat != null && isPointsCat) {
+            if (rawStat != null && isPointsCat) {
                 (0.65 * rawStat + 0.35 * (teamPts * shares[idx])).coerceIn(6.0, 44.0)
             } else {
                 (teamPts * shares[idx]).coerceIn(8.0, 38.0)
             }
+        }
+        val maxCombined = teamPts * 0.72
+        val ptsScale = if (rawMeans.sum() > maxCombined && rawMeans.sum() > 0.0) maxCombined / rawMeans.sum() else 1.0
+        return leaders.mapIndexed { idx, p ->
+            val mean = (rawMeans[idx] * ptsScale).coerceIn(6.0, 44.0)
             val line = centeredHalfLine(mean)
             val sd = max(4.2, mean * 0.27)
             val overPct = ((1.0 - StatsMath.normalCdf((line - mean) / sd)) * 100.0).roundToInt().coerceIn(5, 95)
@@ -255,7 +271,7 @@ object PlayerPropsEngine {
         val out = mutableListOf<PlayerPropPrediction>()
         val qb = players.firstOrNull { it.position.equals("QB", ignoreCase = true) || it.statCategory.contains("pass", ignoreCase = true) }
         val rb = players.firstOrNull { it.position.equals("RB", ignoreCase = true) || it.statCategory.contains("rush", ignoreCase = true) }
-        val wr = players.firstOrNull { it.position in setOf("WR", "TE") || it.statCategory.contains("receiv", ignoreCase = true) }
+        val wr = players.firstOrNull { it.position.trim().uppercase(Locale.US) in setOf("WR", "TE") || it.statCategory.contains("receiv", ignoreCase = true) }
 
         val paceMult = (teamPts / 22.0).coerceIn(0.75, 1.35)
         qb?.let {
@@ -390,7 +406,7 @@ object PlayerPropsEngine {
         }
     }
 
-    private fun centeredHalfLine(mean: Double): Double = max(0.5, floor(mean) + 0.5)
+    private fun centeredHalfLine(mean: Double): Double = max(0.5, mean.roundToInt().toDouble() - 0.5)
     private fun round1(v: Double): Double = (v * 10.0).roundToInt() / 10.0
     private fun round2(v: Double): Double = (v * 100.0).roundToInt() / 100.0
     private fun confidenceTag(pct: Int): String = when {
@@ -399,9 +415,9 @@ object PlayerPropsEngine {
         else -> "Lean"
     }
 
-    fun normalizeFormScore(rawScore: Double): Double {
-        if (!rawScore.isFinite()) return 0.5
-        return if (rawScore > 1.0) (rawScore / 5.0).coerceIn(0.0, 1.0) else rawScore.coerceIn(0.0, 1.0)
+    fun normalizeFormScore(rawScore: Double, maxScale: Double = 5.0): Double {
+        if (!rawScore.isFinite() || maxScale <= 0.0) return 0.5
+        return (rawScore / maxScale).coerceIn(0.0, 1.0)
     }
 
     fun computeFeatureDrivers(
@@ -456,7 +472,7 @@ object PlayerPropsEngine {
             )
         }
 
-        if (sport != Sport.TENNIS) {
+        if (sport != Sport.TENNIS && sport != Sport.F1 && sport != Sport.MMA) {
             val hfa = when (sport) {
                 Sport.FOOTBALL -> 4.2
                 Sport.NBA -> 3.6

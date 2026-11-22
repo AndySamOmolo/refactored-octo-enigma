@@ -268,12 +268,12 @@ object ThemePresets {
         name = "Crisp Daylight",
         mode = ThemeMode.LIGHT,
         useDynamicColor = false,
-        accentHex = "#0284C7",
+        accentHex = "#0369A1",
         winHex = "#15803D",
         drawHex = "#B45309",
         lossHex = "#DC2626",
         pendingHex = "#64748B",
-        oddsUpHex = "#059669",
+        oddsUpHex = "#047857",
         oddsDownHex = "#E11D48",
         valueHighlightHex = "#7C3AED",
         sharpBadgeHex = "#0891B2",
@@ -331,7 +331,7 @@ object ThemePresets {
         drawHex = "#E69F00",
         lossHex = "#D55E00",
         pendingHex = "#94A3B8",
-        oddsUpHex = "#0072B2",
+        oddsUpHex = "#38BDF8",
         oddsDownHex = "#D55E00",
         valueHighlightHex = "#CC79A7",
         sharpBadgeHex = "#F0E442",
@@ -992,12 +992,18 @@ fun resolveTokens(
     } else {
         parseHexColor(safe.accentHex, Color(0xFF38BDF8))
     }
-    val win = parseHexColor(safe.winHex, Color(0xFF22C55E))
-    val draw = parseHexColor(safe.drawHex, Color(0xFFF59E0B))
-    val loss = parseHexColor(safe.lossHex, Color(0xFFEF4444))
+    val rawWin = parseHexColor(safe.winHex, Color(0xFF22C55E))
+    val rawDraw = parseHexColor(safe.drawHex, Color(0xFFF59E0B))
+    val rawLoss = parseHexColor(safe.lossHex, Color(0xFFEF4444))
     val pending = parseHexColor(safe.pendingHex, Color(0xFF94A3B8))
-    val oddsUp = parseHexColor(safe.oddsUpHex, Color(0xFF10B981))
-    val oddsDown = parseHexColor(safe.oddsDownHex, Color(0xFFF43F5E))
+    val rawOddsUp = parseHexColor(safe.oddsUpHex, Color(0xFF10B981))
+    val rawOddsDown = parseHexColor(safe.oddsDownHex, Color(0xFFF43F5E))
+    val (win, draw, loss, oddsUp, oddsDown) = when (effectiveMode) {
+        ThemeMode.DEUTERANOPIA -> listOf(Color(0xFF009E73), Color(0xFFE69F00), Color(0xFFD55E00), Color(0xFF56B4E9), Color(0xFFD55E00))
+        ThemeMode.PROTANOPIA -> listOf(Color(0xFF2DD4BF), Color(0xFFFACC15), Color(0xFFFB923C), Color(0xFF38BDF8), Color(0xFFFB923C))
+        ThemeMode.TRITANOPIA -> listOf(Color(0xFF06B6D4), Color(0xFFF472B6), Color(0xFFEF4444), Color(0xFF14B8A6), Color(0xFFFB7185))
+        else -> listOf(rawWin, rawDraw, rawLoss, rawOddsUp, rawOddsDown)
+    }
     val valueHighlight = parseHexColor(safe.valueHighlightHex, Color(0xFFA855F7))
     val sharpBadge = parseHexColor(safe.sharpBadgeHex, Color(0xFF06B6D4))
 

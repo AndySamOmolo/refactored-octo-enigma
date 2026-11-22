@@ -30,7 +30,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -50,6 +52,10 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -124,7 +130,42 @@ class SyncRepository(
         private const val CIRCUIT_COOLDOWN_MS = 15L * 60_000L
 
         private val sharedJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        private val snapshotFileMutex = Mutex()
         private val ODDS_TIME_FMT = DateTimeFormatter.ofPattern("MMM d HH:mm", Locale.US).withZone(ZoneOffset.UTC)
+
+
+        internal fun friendlyNetworkError(e: Exception): String {
+            return when (e) {
+                is UnknownHostException -> "DNS lookup failed (host unreachable)"
+                is SocketTimeoutException -> "Connection timed out"
+                is ConnectException -> "Connection refused"
+                is SSLException -> "Secure connection (TLS) failed"
+                is IOException -> {
+                    val msg = e.message?.trim().orEmpty()
+                    when {
+                        msg == "HTTP 403" -> "Access blocked (HTTP 403)"
+                        msg == "HTTP 404" -> "Feed not found (HTTP 404)"
+                        msg == "HTTP 429" -> "Rate limited (HTTP 429)"
+                        msg.startsWith("HTTP 5") -> "Server error ($msg)"
+                        msg.startsWith("HTTP ") -> msg
+                        msg.isNotBlank() -> truncateAtWord(msg, 64)
+                        else -> "Network error"
+                    }
+                }
+                else -> {
+                    val msg = e.message?.trim().orEmpty()
+                    if (msg.isNotBlank()) truncateAtWord(msg, 64) else "Unavailable"
+                }
+            }
+        }
+
+        private fun truncateAtWord(text: String, maxLen: Int): String {
+            val clean = text.replace(Regex("\\s+"), " ").trim()
+            if (clean.length <= maxLen) return clean
+            val slice = clean.substring(0, maxLen)
+            val lastSpace = slice.lastIndexOf(' ')
+            return if (lastSpace >= maxLen / 2) "${slice.substring(0, lastSpace)}…" else "${slice.trimEnd()}…"
+        }
 
         fun readableLeagueName(leagueId: String, sport: Sport): String {
             if (sport == Sport.F1) return "Formula 1"
@@ -152,13 +193,15 @@ class SyncRepository(
         suspend fun readSnapshotFromDisk(context: Context, db: AppDatabase): AppModelSnapshot? =
             withContext(Dispatchers.IO) {
                 val file = File(context.applicationContext.filesDir, SNAPSHOT_FILE_NAME)
-                if (file.exists() && file.length() > 0L) {
-                    val decoded = runCatching {
-                        GZIPInputStream(FileInputStream(file)).bufferedReader(Charsets.UTF_8).use {
-                            sharedJson.decodeFromString<AppModelSnapshot>(it.readText())
-                        }
-                    }.getOrNull()
-                    if (decoded != null) return@withContext decoded
+                snapshotFileMutex.withLock {
+                    if (file.exists() && file.length() > 0L) {
+                        val decoded = runCatching {
+                            GZIPInputStream(FileInputStream(file)).bufferedReader(Charsets.UTF_8).use {
+                                sharedJson.decodeFromString<AppModelSnapshot>(it.readText())
+                            }
+                        }.getOrNull()
+                        if (decoded != null) return@withContext decoded
+                    }
                 }
                 val saved = runCatching { db.dao().getSnapshot() }.getOrNull() ?: return@withContext null
                 if (saved.payloadJson.startsWith("{")) {
@@ -192,10 +235,12 @@ class SyncRepository(
         val target = File(appContext.filesDir, SNAPSHOT_FILE_NAME)
         val tmp = File(appContext.filesDir, "$SNAPSHOT_FILE_NAME.tmp")
         val encoded = json.encodeToString(snap)
-        GZIPOutputStream(FileOutputStream(tmp)).bufferedWriter(Charsets.UTF_8).use { it.write(encoded) }
-        if (!tmp.renameTo(target)) {
-            tmp.copyTo(target, overwrite = true)
-            tmp.delete()
+        snapshotFileMutex.withLock {
+            GZIPOutputStream(FileOutputStream(tmp)).bufferedWriter(Charsets.UTF_8).use { it.write(encoded) }
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
         }
 
         val nowMs = snap.lastSyncEpochMs
@@ -284,17 +329,19 @@ class SyncRepository(
                 .url(url)
                 .header("User-Agent", "EdgeLedgerAndroid/8.0 (Personal Offline Predictor)")
                 .build()
+            var retryDelayMs: Long? = null
             executeCancellable(req).use { resp ->
-                if (resp.code == 429 && attempt == 0) {
+                if ((resp.code == 429 || resp.code in 502..504) && attempt == 0) {
                     val retrySec = resp.header("Retry-After")?.toLongOrNull()?.coerceIn(1L, 10L) ?: 2L
                     attempt++
-                    delay(retrySec * 1000L)
+                    retryDelayMs = retrySec * 1000L
                 } else if (!resp.isSuccessful) {
                     throw IOException("HTTP ${resp.code}")
                 } else {
                     return readBoundedText(resp)
                 }
             }
+            if (retryDelayMs != null) delay(retryDelayMs!!)
         }
     }
 
@@ -416,6 +463,9 @@ class SyncRepository(
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NFL, "NFL", "NFL")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
+                FeedSpec("espn-nfl-standings", "ESPN NFL Standings", Sport.NFL, "https://site.web.api.espn.com/apis/v2/sports/football/nfl/standings", "https://site.api.espn.com/apis/v2/sports/football/nfl/standings") { raw ->
+                    val map = CsvAndFeedParsers.parseEspnNflStandings(raw); liveStandingsProfiles.putAll(map); map.size
+                },
                 FeedSpec("espn-nba", "ESPN NBA Scoreboard", Sport.NBA, "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NBA, "NBA", "NBA")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
@@ -461,7 +511,7 @@ class SyncRepository(
                             } catch (e: Exception) {
                                 val prevFails = circuitStates[feed.id]?.consecutiveFailures ?: 0
                                 circuitStates[feed.id] = CircuitState(prevFails + 1, nowMs)
-                                health.add(ProviderHealth(feed.id, feed.name, feed.sport, "OFFLINE", 0, now.toString(), e.message?.take(80) ?: "Unavailable"))
+                                health.add(ProviderHealth(feed.id, feed.name, feed.sport, "OFFLINE", 0, now.toString(), friendlyNetworkError(e)))
                             }
                         }
                     }
@@ -675,9 +725,15 @@ class SyncRepository(
             // Batch-load prior Room odds history for all upcoming fixtures
             val allFixtureIds = upcomingWithOdds.map { it.id }
             val priorGrouped = if (allFixtureIds.isNotEmpty()) {
-                runCatching { db.dao().getOddsHistoryForFixtures(allFixtureIds) }
-                    .getOrDefault(emptyList())
-                    .groupBy { it.fixtureId }
+                try {
+                    allFixtureIds.chunked(500).flatMap { chunk ->
+                        db.dao().getOddsHistoryForFixtures(chunk)
+                    }.groupBy { it.fixtureId }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Exception) {
+                    emptyMap()
+                }
             } else {
                 emptyMap()
             }
@@ -709,10 +765,18 @@ class SyncRepository(
                 if (combined.size >= 2) oddsHistoryMap[ev.id] = combined
             }
 
+            // Semantic deduplication across CSV + ESPN feeds (prefer richer CSV records over scoreboard-only)
+            val dedupedHistory = liveHistory.toList()
+                .groupBy { "${it.sport.name}|${it.dateIso}|${it.homeTeam.lowercase(Locale.ROOT)}|${it.awayTeam.lowercase(Locale.ROOT)}" }
+                .values
+                .map { dupes -> dupes.maxByOrNull { (if (it.oddsHome != null) 4 else 0) + (if (it.homeShots != null) 2 else 0) + (if (!it.id.startsWith("espn_")) 1 else 0) }!! }
+
             _syncStatusText.value = "Running on-device prediction models..."
-            val snap = withContext(Dispatchers.Default) {
+            val prevSnap = _snapshot.value
+            val succeededSports = health.filter { it.status == "LIVE" || it.status == "OFF-SEASON" }.map { it.sport }.toSet()
+            val compiled = withContext(Dispatchers.Default) {
                 compileSnapshot(
-                    history = liveHistory.toList(),
+                    history = dedupedHistory,
                     upcoming = upcomingWithOdds,
                     clubElo = clubElo.toMap(),
                     health = health.toList(),
@@ -725,14 +789,33 @@ class SyncRepository(
                 )
             }
 
-            _snapshot.value = snap
+            // Partial-sync resilience: keep prior cached fixtures/profiles/trackRecords for any sport whose feeds all failed
+            val snap = if (!prevSnap.isSeedData && prevSnap.fixtures.isNotEmpty()) {
+                val preservedFixtures = prevSnap.fixtures.filter { it.sport !in succeededSports }
+                val preservedProfiles = prevSnap.profiles.filterValues { it.sport !in succeededSports }
+                val preservedTracks = prevSnap.trackRecords.filter { it.sport !in succeededSports }
+                compiled.copy(
+                    fixtures = (compiled.fixtures + preservedFixtures).distinctBy { it.id },
+                    profiles = preservedProfiles + compiled.profiles,
+                    trackRecords = (compiled.trackRecords + preservedTracks).distinctBy { it.sport to it.leagueId },
+                )
+            } else {
+                compiled
+            }
             persistSnapshot(snap, newOddsSnapshots)
-            runCatching { TopPicksWidget().updateAll(appContext) }
+            _snapshot.value = snap
+            try {
+                TopPicksWidget().updateAll(appContext)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Exception) {
+                // Non-fatal widget refresh error
+            }
             true
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
-            _syncError.value = e.message?.take(120) ?: "Sync failed"
+            _syncError.value = friendlyNetworkError(e)
             false
         } finally {
             syncingLock.set(false)
@@ -776,8 +859,9 @@ class SyncRepository(
                 else -> emptyList()
             }
             if (players.isNotEmpty()) {
-                val existing = liveRosters[key].orEmpty()
-                liveRosters[key] = (existing + players).distinctBy { it.name.lowercase(Locale.ROOT) }
+                liveRosters.merge(key, players) { existing, incoming ->
+                    (existing + incoming).distinctBy { it.name.lowercase(Locale.ROOT) }
+                }
             }
         } catch (ce: CancellationException) {
             throw ce

@@ -3,6 +3,7 @@ package com.edgeledger.app.theme
 import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
@@ -71,25 +72,30 @@ fun EdgeLedgerTheme(
 
     val isLight = config.mode == ThemeMode.LIGHT
 
-    val dynamicScheme = if (config.useDynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        if (isLight) dynamicLightColorScheme(context) else dynamicDarkColorScheme(context)
-    } else {
-        null
+    val dynamicPrimary = remember(context, config.useDynamicColor, isLight) {
+        if (config.useDynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (if (isLight) dynamicLightColorScheme(context) else dynamicDarkColorScheme(context)).primary
+        } else {
+            null
+        }
     }
 
-    val tokens = remember(config, dynamicScheme, isPowerSaveMode) {
+    val tokens = remember(config, dynamicPrimary, isPowerSaveMode) {
         resolveTokens(
             config = config,
-            dynamicAccentOverride = dynamicScheme?.primary,
+            dynamicAccentOverride = dynamicPrimary,
             isBatterySaverActive = isPowerSaveMode,
         )
     }
 
-    val colorScheme = dynamicScheme ?: tokens.colorScheme
+    // Keep MaterialTheme and AppTheme.tokens unified so AMOLED/Light/CVD surfaces never split-brain
+    val colorScheme = tokens.colorScheme
 
     if (!view.isInEditMode) {
         SideEffect {
-            val window = (view.context as? Activity)?.window
+            var ctx: Context? = view.context
+            while (ctx is ContextWrapper && ctx !is Activity) ctx = ctx.baseContext
+            val window = (ctx as? Activity)?.window
             if (window != null) {
                 val controller = WindowCompat.getInsetsController(window, view)
                 controller.isAppearanceLightStatusBars = !tokens.isDark
