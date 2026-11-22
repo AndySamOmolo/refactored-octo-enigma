@@ -1,7 +1,6 @@
 package com.edgeledger.app.data
 
 import android.content.Context
-import androidx.glance.appwidget.updateAll
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
@@ -11,7 +10,6 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.edgeledger.app.EdgeLedgerApp
-import com.edgeledger.app.widget.TopPicksWidget
 import kotlinx.coroutines.CancellationException
 import java.util.concurrent.TimeUnit
 
@@ -30,7 +28,6 @@ class WeeklySyncWorker(
         if (!app.prefsRepo.prefs.value.autoSyncWeekly) return Result.success()
         return try {
             val ok = app.syncRepo.runOnDeviceWeeklySyncWithStatus()
-            runCatching { TopPicksWidget().updateAll(applicationContext) }
             if (ok) Result.success()
             else if (runAttemptCount >= 3) Result.failure()
             else Result.retry()
@@ -48,6 +45,7 @@ class WeeklySyncWorker(
             context: Context,
             enabled: Boolean = true,
             wifiOnly: Boolean = false,
+            replaceExisting: Boolean = true,
         ) {
             val wm = WorkManager.getInstance(context.applicationContext)
             if (!enabled) {
