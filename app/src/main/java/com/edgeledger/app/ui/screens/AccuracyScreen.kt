@@ -27,13 +27,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.edgeledger.app.EdgeLedgerApp
 import com.edgeledger.app.data.SyncRepository
 import com.edgeledger.app.engine.OddsMath
-import kotlin.math.roundToInt
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.ui.components.MetricTile
 import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatusBadge
 import com.edgeledger.app.ui.components.scaledSp
 import com.edgeledger.app.ui.components.tabularStyle
+import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 fun AccuracyScreen(app: EdgeLedgerApp) {
@@ -51,6 +52,19 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text("Track Record & Accuracy", color = c.text, fontSize = scaledSp(20f), fontWeight = FontWeight.ExtraBold)
                 Text("Tested strictly chronologically on past games without peeking ahead.", color = c.textMuted, fontSize = scaledSp(13f))
+            }
+        }
+
+        if (snapshot.trackRecords.isEmpty()) {
+            item {
+                SectionCard {
+                    Text("No backtest history yet", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
+                    Text(
+                        "Tap Update on the Games tab to download live historical datasets and run walk-forward accuracy tests on your phone.",
+                        color = c.textMuted,
+                        fontSize = scaledSp(12.5f),
+                    )
+                }
             }
         }
 
@@ -76,12 +90,20 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
                     }
                     StatusBadge(text = badgeTxt, color = badgeFg, containerColor = badgeBg)
                 }
-                val approxWins = ((rec.accuracyScore / 100.0) * rec.gamesTested).roundToInt().coerceIn(0, rec.gamesTested)
-                val sig = OddsMath.computeSignificance(approxWins, rec.gamesTested, if (rec.sport.hasDraw) 0.44 else 0.50)
+                val binTotal = rec.reliabilityBins.sumOf { it.count }
+                val binHits = rec.reliabilityBins.sumOf { ((it.actualWinPct / 100.0) * it.count).roundToInt() }
+                val sig = if (binTotal > 0) {
+                    OddsMath.computeSignificance(binHits.coerceIn(0, binTotal), binTotal, if (rec.sport.hasDraw) 0.44 else 0.50)
+                } else null
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricTile("Accuracy", "${rec.accuracyScore}/100", sig.plainLabel, Modifier.weight(1f))
+                    MetricTile("Skill Score", "${rec.accuracyScore}/100", sig?.plainLabel, Modifier.weight(1f))
                     MetricTile("Games", "${rec.gamesTested}", null, Modifier.weight(1f))
-                    MetricTile("Profit", if (rec.hasGradedOdds) "${if (rec.simulatedProfitPct >= 0) "+" else ""}${rec.simulatedProfitPct}%" else "N/A", null, Modifier.weight(1f))
+                    MetricTile(
+                        "Sim ROI",
+                        if (rec.hasGradedOdds) "${if (rec.simulatedProfitPct >= 0) "+" else ""}${String.format(Locale.US, "%.1f", rec.simulatedProfitPct)}%" else "N/A",
+                        null,
+                        Modifier.weight(1f),
+                    )
                 }
                 if (rec.reliabilityBins.isNotEmpty()) {
                     Text("When we say X%, how often do they actually win?", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.SemiBold)
@@ -98,7 +120,6 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
             }
         }
 
-        // Immutable SHA-256 Locked Pick Ledger (TR-02)
         if (lockedPicks.isNotEmpty()) {
             item {
                 SectionCard {
@@ -117,12 +138,11 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
             }
         }
 
-        // Live Prediction Markets (Polymarket & Kalshi)
         if (snapshot.predictionMarkets.isNotEmpty()) {
             item {
                 SectionCard {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("Live Markets (${snapshot.predictionMarkets.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f), modifier = Modifier.weight(1f))
+                        Text("Live Sports Markets (${snapshot.predictionMarkets.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f), modifier = Modifier.weight(1f))
                         val activePmSources = snapshot.predictionMarkets.map { it.source }.distinct().joinToString(" · ")
                         StatusBadge(activePmSources.ifBlank { "Sports Markets" }, c.sharpBadge, c.sharpBadgeDim)
                     }
@@ -144,7 +164,6 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
             }
         }
 
-        // Data Feed Health & Circuit Breaker Status (DT-03, DT-05)
         item {
             SectionCard {
                 Text("Data Feeds & Sync Health", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))

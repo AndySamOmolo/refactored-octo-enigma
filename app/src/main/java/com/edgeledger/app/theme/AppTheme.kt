@@ -1,7 +1,10 @@
 package com.edgeledger.app.theme
 
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.PowerManager
 import androidx.compose.material3.MaterialTheme
@@ -9,12 +12,17 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 
 val LocalAppTokens = staticCompositionLocalOf { resolveTokens(ThemeConfigV1()) }
@@ -34,11 +42,31 @@ fun EdgeLedgerTheme(
     val context = LocalContext.current
     val view = LocalView.current
 
-    val isPowerSaveMode = remember(context) {
+    var isPowerSaveMode by remember(context) {
+        mutableStateOf(
+            runCatching {
+                val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                pm?.isPowerSaveMode == true
+            }.getOrDefault(false)
+        )
+    }
+
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                isPowerSaveMode = runCatching {
+                    val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                    pm?.isPowerSaveMode == true
+                }.getOrDefault(false)
+            }
+        }
+        val filter = IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
         runCatching {
-            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-            pm?.isPowerSaveMode == true
-        }.getOrDefault(false)
+            ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        }
+        onDispose {
+            runCatching { context.unregisterReceiver(receiver) }
+        }
     }
 
     val isLight = config.mode == ThemeMode.LIGHT

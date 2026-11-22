@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,17 +20,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -37,10 +42,10 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
-import coil.ImageLoader
-import coil.compose.SubcomposeAsyncImage
-import coil.decode.SvgDecoder
-import coil.request.ImageRequest
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -48,15 +53,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.edgeledger.app.theme.AppTheme
+import coil.compose.SubcomposeAsyncImage
+import coil.imageLoader
+import coil.request.ImageRequest
 import com.edgeledger.app.engine.FeatureDriver
 import com.edgeledger.app.engine.LineMovePoint
 import com.edgeledger.app.engine.PlayerPropPrediction
+import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.theme.HapticLevel
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -71,18 +75,20 @@ private val TEAM_COLORS = listOf(
     Color(0xFF0D9488), Color(0xFFB91C1C), Color(0xFF1D4ED8), Color(0xFF9333EA),
 )
 
+private val LOCAL_KICKOFF_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MMM d · HH:mm", Locale.US)
+
+private val WHITESPACE_SPLIT_REGEX = Regex("\\s+")
+
 /**
- * Pure, crash-proof stat formatter (fixes Java String.format "%" conversion crash).
+ * Pure, crash-proof stat formatter (guards NaN/Infinity and avoids locale-dependent decimals).
  */
 fun formatStatValue(value: Double, decimals: Int = 1, suffix: String = ""): String {
+    if (!value.isFinite()) return "—$suffix"
     val safeDec = decimals.coerceIn(0, 4)
     return String.format(Locale.US, "%.${safeDec}f", value) + suffix
 }
 
-/**
- * Smart readable short team names so ProbBar never truncates "Crystal Palace" to "Crystal"
- * or "Aston Villa" to "Aston".
- */
 fun shortTeamName(fullName: String): String {
     val clean = fullName.trim()
     val known = mapOf(
@@ -168,9 +174,9 @@ fun shortTeamName(fullName: String): String {
         "new orleans saints" to "Saints",
         "miami dolphins" to "Dolphins",
     )
-    known[clean.lowercase(Locale.US)]?.let { return it }
+    known[clean.lowercase(Locale.ROOT)]?.let { return it }
     if (clean.length <= 13) return clean
-    val words = clean.split(Regex("\\s+")).filter { it.isNotEmpty() }
+    val words = clean.split(WHITESPACE_SPLIT_REGEX).filter { it.isNotEmpty() }
     return when {
         words.size >= 2 && words[0].length >= 4 -> "${words[0].first()}. ${words.drop(1).joinToString(" ")}".take(14)
         else -> clean.take(14)
@@ -193,8 +199,7 @@ fun scaledSp(baseSp: Float) = (baseSp * AppTheme.tokens.fontScale).coerceAtLeast
 
 fun formatLocalKickoff(kickoffIso: String): String = runCatching {
     val instant = Instant.parse(kickoffIso)
-    val local = instant.atZone(ZoneId.systemDefault())
-    local.format(DateTimeFormatter.ofPattern("MMM d · HH:mm", Locale.US))
+    instant.atZone(ZoneId.systemDefault()).format(LOCAL_KICKOFF_FORMATTER)
 }.getOrElse { kickoffIso.take(16).replace("T", " · ") }
 
 @Composable
@@ -249,14 +254,17 @@ fun TokenPill(
     val haptic = LocalHapticFeedback.current
 
     Surface(
-        modifier = modifier.clickable {
-            if (t.config.haptics != HapticLevel.OFF) {
-                haptic.performHapticFeedback(
-                    if (t.config.haptics == HapticLevel.CRISP) HapticFeedbackType.LongPress else HapticFeedbackType.TextHandleMove
-                )
-            }
-            onClick()
-        },
+        modifier = modifier
+            .defaultMinSize(minHeight = 38.dp)
+            .semantics { this.selected = selected }
+            .clickable(role = Role.Tab) {
+                if (t.config.haptics != HapticLevel.OFF) {
+                    haptic.performHapticFeedback(
+                        if (t.config.haptics == HapticLevel.CRISP) HapticFeedbackType.LongPress else HapticFeedbackType.TextHandleMove
+                    )
+                }
+                onClick()
+            },
         shape = t.shapes.chip,
         color = if (selected) activeContainer else c.surface,
         border = BorderStroke(
@@ -264,19 +272,23 @@ fun TokenPill(
             color = if (selected) activeColor else c.border,
         ),
     ) {
-        Text(
-            text = label,
-            color = if (selected) activeColor else c.textSecondary,
-            fontSize = scaledSp(12f),
-            fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
+        Box(
+            contentAlignment = Alignment.Center,
             modifier = Modifier.padding(
                 horizontal = t.spacing.chipHorizontalPadding,
                 vertical = t.spacing.chipVerticalPadding,
             ),
-        )
+        ) {
+            Text(
+                text = label,
+                color = if (selected) activeColor else c.textSecondary,
+                fontSize = scaledSp(12f),
+                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 
@@ -311,13 +323,15 @@ fun TeamAvatar(
     size: Dp = 40.dp,
     logoUrl: String? = null,
 ) {
-    val words = teamName.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    val words = remember(teamName) {
+        teamName.trim().split(WHITESPACE_SPLIT_REGEX).filter { it.isNotEmpty() }
+    }
     val initials = when {
         words.isEmpty() -> "??"
-        words.size == 1 -> words[0].take(2).uppercase()
-        else -> "${words[0][0]}${words[1][0]}".uppercase()
+        words.size == 1 -> words[0].take(2).uppercase(Locale.ROOT)
+        else -> "${words[0][0]}${words[1][0]}".uppercase(Locale.ROOT)
     }
-    val color = TEAM_COLORS[abs(teamName.lowercase().hashCode()) % TEAM_COLORS.size]
+    val color = TEAM_COLORS[Math.floorMod(teamName.lowercase(Locale.ROOT).hashCode(), TEAM_COLORS.size)]
     val c = AppTheme.tokens.colors
 
     @Composable
@@ -343,12 +357,6 @@ fun TeamAvatar(
         InitialsFallback()
     } else {
         val context = LocalContext.current
-        val imageLoader = remember(context) {
-            ImageLoader.Builder(context)
-                .components { add(SvgDecoder.Factory()) }
-                .crossfade(true)
-                .build()
-        }
         Box(
             modifier = Modifier
                 .size(size)
@@ -362,7 +370,7 @@ fun TeamAvatar(
                     .data(logoUrl)
                     .crossfade(true)
                     .build(),
-                imageLoader = imageLoader,
+                imageLoader = context.imageLoader,
                 contentDescription = "$teamName logo",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.size(size * 0.80f),
@@ -389,7 +397,16 @@ fun ProbBar(
     val dPct = if (hasDraw) (((drawProb ?: 0.0) / sum) * 100.0).roundToInt().coerceIn(1, 98) else 0
     val aPct = (100 - hPct - dPct).coerceAtLeast(1)
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    val a11yDesc = if (hasDraw) {
+        "Win probability: $homeLabel $hPct percent, Draw $dPct percent, $awayLabel $aPct percent"
+    } else {
+        "Win probability: $homeLabel $hPct percent, $awayLabel $aPct percent"
+    }
+
+    Column(
+        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = a11yDesc },
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(homeLabel, color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             if (hasDraw) {
@@ -423,10 +440,6 @@ fun ProbBar(
     }
 }
 
-/**
- * Always renders 5 uniform slots (padding with subtle "–" when fewer than 5 games exist)
- * so the center "Last 5" label stays perfectly centered on every card.
- */
 @Composable
 fun FormDots(results: List<String>, alignEnd: Boolean = false) {
     val t = AppTheme.tokens
@@ -439,7 +452,13 @@ fun FormDots(results: List<String>, alignEnd: Boolean = false) {
         recent
     }
 
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier.semantics(mergeDescendants = true) {
+            contentDescription = "Recent form: ${recent.joinToString(", ").ifBlank { "No recent games" }}"
+        },
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         padded.forEach { res ->
             val bg = when (res) {
                 "W" -> c.win
@@ -549,12 +568,6 @@ fun MetricTile(
     }
 }
 
-
-/**
- * Interactive Line Movement & Steam Move Chart (OD-02, CH-01, CH-02).
- * Uses solid primary line for Sharp consensus and dashed secondary line for Retail books
- * so series remain distinguishable in all color-blind modes.
- */
 @Composable
 fun LineMovementChart(
     points: List<LineMovePoint>,
@@ -569,7 +582,20 @@ fun LineMovementChart(
     val range = max(4f, maxVal - minVal)
     val steamCount = points.count { it.isSteamMove }
 
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val labelPoints = if (points.size <= 5) {
+        points
+    } else {
+        listOf(points.first(), points[points.size / 2], points.last())
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .semantics {
+                contentDescription = "Line movement chart from ${points.first().sharpHomeProbPct.roundToInt()}% to ${points.last().sharpHomeProbPct.roundToInt()}% sharp probability, $steamCount steam moves"
+            },
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -578,7 +604,7 @@ fun LineMovementChart(
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Box(Modifier.size(10.dp).clip(CircleShape).background(c.draw))
-                    Text("Retail Avg (Dashed)", color = c.textMuted, fontSize = scaledSp(11f), fontWeight = FontWeight.Medium)
+                    Text("Retail (Dashed)", color = c.textMuted, fontSize = scaledSp(11f), fontWeight = FontWeight.Medium)
                 }
             }
             if (steamCount > 0) {
@@ -598,7 +624,6 @@ fun LineMovementChart(
             val h = size.height
             val stepX = w / (points.size - 1).coerceAtLeast(1)
 
-            // Horizontal guide lines
             for (g in 0..2) {
                 val gy = h * (g / 2f)
                 drawLine(
@@ -653,7 +678,7 @@ fun LineMovementChart(
         }
 
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            points.forEach { pt ->
+            labelPoints.forEach { pt ->
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(pt.timeLabel, color = c.textMuted, fontSize = scaledSp(10f), fontWeight = FontWeight.SemiBold)
                     Text(
@@ -666,9 +691,6 @@ fun LineMovementChart(
     }
 }
 
-/**
- * Quantitative + Plain-English Feature Driver Row (PR-04).
- */
 @Composable
 fun FeatureDriverRow(driver: FeatureDriver) {
     val c = AppTheme.tokens.colors
@@ -692,9 +714,6 @@ fun FeatureDriverRow(driver: FeatureDriver) {
     }
 }
 
-/**
- * Player Prop Prediction Card with 80% projected range and 1-tap Save (PR-03).
- */
 @Composable
 fun PlayerPropCard(
     prop: PlayerPropPrediction,
@@ -721,7 +740,7 @@ fun PlayerPropCard(
                 }
                 Text("${prop.marketLabel}: ${prop.lineLabel}", color = c.accent, fontSize = scaledSp(13f), fontWeight = FontWeight.Bold)
                 Text(
-                    "Projected ${formatStatValue(prop.projectedValue, 1)} (80% range ${formatStatValue(prop.rangeLow, 1)}–${formatStatValue(prop.rangeHigh, 1)}) · ${prop.overChancePct}% chance",
+                    "Projected ${formatStatValue(prop.projectedValue, 1)} (70% range ${formatStatValue(prop.rangeLow, 1)}–${formatStatValue(prop.rangeHigh, 1)}) · ${prop.overChancePct}% chance",
                     style = tabularStyle(11.5f, FontWeight.SemiBold, c.textSecondary),
                 )
                 Text(prop.plainReason, color = c.textMuted, fontSize = scaledSp(11.5f), maxLines = if (expanded) 8 else 2, overflow = TextOverflow.Ellipsis)

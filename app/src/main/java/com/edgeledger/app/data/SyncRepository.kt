@@ -1,11 +1,14 @@
 package com.edgeledger.app.data
 
 import android.content.Context
+import androidx.glance.appwidget.updateAll
+import androidx.room.withTransaction
 import com.edgeledger.app.engine.CsvAndFeedParsers
 import com.edgeledger.app.engine.OddsMath
 import com.edgeledger.app.engine.PlayerPropsEngine
 import com.edgeledger.app.engine.PredictionEngine
 import com.edgeledger.app.engine.RawUpcomingEvent
+import com.edgeledger.app.model.BookmakerOddsLine
 import com.edgeledger.app.model.HeadToHeadGame
 import com.edgeledger.app.model.HistoricalMatch
 import com.edgeledger.app.model.LeagueTrackRecord
@@ -16,23 +19,49 @@ import com.edgeledger.app.model.ProviderHealth
 import com.edgeledger.app.model.Sport
 import com.edgeledger.app.model.StadiumWeather
 import com.edgeledger.app.model.TeamProfile
+import com.edgeledger.app.widget.TopPicksWidget
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 
 @Serializable
@@ -48,23 +77,31 @@ data class AppModelSnapshot(
     val liveRosters: Map<String, List<LivePlayerEntry>> = emptyMap(),
 )
 
+private data class CircuitState(
+    val consecutiveFailures: Int,
+    val openedAtEpochMs: Long,
+)
+
 class SyncRepository(
     context: Context,
     private val db: AppDatabase,
     private val prefsRepo: ThemeAndPrefsRepository,
 ) {
+    private val appContext = context.applicationContext
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(20, TimeUnit.SECONDS)
         .build()
 
     private val optionalClient = OptionalOddsAndDataClient(client)
+    private val circuitStates = ConcurrentHashMap<String, CircuitState>()
+    private val syncingLock = AtomicBoolean(false)
 
-    // Circuit Breaker failure counter per feed (DT-05)
-    private val failureCounts = mutableMapOf<String, Int>()
-
-    private val _snapshot = MutableStateFlow(buildOfflineSeedSnapshot())
+    private val _snapshot = MutableStateFlow(buildEmptyReadySnapshot())
     val snapshot: StateFlow<AppModelSnapshot> = _snapshot.asStateFlow()
 
     private val _syncing = MutableStateFlow(false)
@@ -73,44 +110,70 @@ class SyncRepository(
     private val _syncStatusText = MutableStateFlow("")
     val syncStatusText: StateFlow<String> = _syncStatusText.asStateFlow()
 
+    private val _syncError = MutableStateFlow<String?>(null)
+    val syncError: StateFlow<String?> = _syncError.asStateFlow()
+
     private val _providerQuotas = MutableStateFlow<List<ProviderQuotaStatus>>(emptyList())
     val providerQuotas: StateFlow<List<ProviderQuotaStatus>> = _providerQuotas.asStateFlow()
 
     companion object {
+        private const val SNAPSHOT_FILE_NAME = "edgeledger_snapshot.json.gz"
+        private const val SNAPSHOT_MARKER_FILE_BACKED = "FILE_BACKED"
+        private const val MAX_BODY_BYTES = 15 * 1024 * 1024
+        private const val CIRCUIT_FAILURE_THRESHOLD = 3
+        private const val CIRCUIT_COOLDOWN_MS = 15L * 60_000L
+
+        private val sharedJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        private val ODDS_TIME_FMT = DateTimeFormatter.ofPattern("MMM d HH:mm", Locale.US).withZone(ZoneOffset.UTC)
+
         fun readableLeagueName(leagueId: String, sport: Sport): String {
             if (sport == Sport.F1) return "Formula 1"
             if (sport == Sport.MMA) return "UFC / MMA"
             if (sport == Sport.CRICKET) return "Cricket · ICC"
-            return when (leagueId.uppercase()) {
-            "E0" -> "Premier League"
-            "E1" -> "Championship"
-            "SP1" -> "La Liga"
-            "D1" -> "Bundesliga"
-            "I1" -> "Serie A"
-            "F1" -> "Ligue 1"
-            "NFL" -> "NFL"
-            "NBA" -> "NBA"
-            "NHL" -> "NHL"
-            "MLB" -> "MLB"
-            "ATP" -> "ATP Tour"
-            "CRI" -> "International Cricket"
-            "F1R" -> "Formula 1"
-            "UFC" -> "UFC / MMA"
-            else -> leagueId.ifBlank { sport.label }
+            return when (leagueId.uppercase(Locale.US)) {
+                "E0" -> "Premier League"
+                "E1" -> "Championship"
+                "SP1" -> "La Liga"
+                "D1" -> "Bundesliga"
+                "I1" -> "Serie A"
+                "F1" -> "Ligue 1"
+                "NFL" -> "NFL"
+                "NBA" -> "NBA"
+                "NHL" -> "NHL"
+                "MLB" -> "MLB"
+                "ATP" -> "ATP Tour"
+                "CRI" -> "International Cricket"
+                "F1R" -> "Formula 1"
+                "UFC" -> "UFC / MMA"
+                else -> leagueId.ifBlank { sport.label }
             }
         }
+
+        suspend fun readSnapshotFromDisk(context: Context, db: AppDatabase): AppModelSnapshot? =
+            withContext(Dispatchers.IO) {
+                val file = File(context.applicationContext.filesDir, SNAPSHOT_FILE_NAME)
+                if (file.exists() && file.length() > 0L) {
+                    val decoded = runCatching {
+                        GZIPInputStream(FileInputStream(file)).bufferedReader(Charsets.UTF_8).use {
+                            sharedJson.decodeFromString<AppModelSnapshot>(it.readText())
+                        }
+                    }.getOrNull()
+                    if (decoded != null) return@withContext decoded
+                }
+                val saved = runCatching { db.dao().getSnapshot() }.getOrNull() ?: return@withContext null
+                if (saved.payloadJson.startsWith("{")) {
+                    return@withContext runCatching {
+                        sharedJson.decodeFromString<AppModelSnapshot>(saved.payloadJson)
+                    }.getOrNull()
+                }
+                null
+            }
     }
 
     suspend fun hydrateFromRoom() = withContext(Dispatchers.IO) {
-        val saved = db.dao().getSnapshot()
-        if (saved != null) {
-            runCatching { json.decodeFromString<AppModelSnapshot>(saved.payloadJson) }
-                .onSuccess { _snapshot.value = it }
-        } else {
-            val seed = buildOfflineSeedSnapshot()
-            _snapshot.value = seed
-            persistSnapshot(seed)
-        }
+        prefsRepo.awaitLoaded()
+        val loaded = readSnapshotFromDisk(appContext, db)
+        _snapshot.value = loaded ?: buildEmptyReadySnapshot()
         _providerQuotas.value = optionalClient.getQuotaSummary(prefsRepo.apiKeys.value)
     }
 
@@ -118,119 +181,230 @@ class SyncRepository(
         _providerQuotas.value = optionalClient.getQuotaSummary(prefsRepo.apiKeys.value)
     }
 
-    private suspend fun persistSnapshot(snap: AppModelSnapshot) {
-        db.dao().saveSnapshot(
-            SnapshotEntity(
-                id = 1,
-                lastSyncEpochMs = snap.lastSyncEpochMs,
-                isSeedData = snap.isSeedData,
-                totalHistoricalMatches = snap.totalHistoricalMatches,
-                payloadJson = json.encodeToString(snap),
-            )
-        )
-        // Lock top picks immutably with SHA-256 hash (TR-02)
-        val nowIso = Instant.ofEpochMilli(snap.lastSyncEpochMs).toString()
+    fun clearSyncError() {
+        _syncError.value = null
+    }
+
+    private suspend fun persistSnapshot(
+        snap: AppModelSnapshot,
+        oddsHistoryBatch: List<OddsHistoryEntity>,
+    ) = withContext(Dispatchers.IO) {
+        val target = File(appContext.filesDir, SNAPSHOT_FILE_NAME)
+        val tmp = File(appContext.filesDir, "$SNAPSHOT_FILE_NAME.tmp")
+        val encoded = json.encodeToString(snap)
+        GZIPOutputStream(FileOutputStream(tmp)).bufferedWriter(Charsets.UTF_8).use { it.write(encoded) }
+        if (!tmp.renameTo(target)) {
+            tmp.copyTo(target, overwrite = true)
+            tmp.delete()
+        }
+
+        val nowMs = snap.lastSyncEpochMs
+        val nowIso = Instant.ofEpochMilli(nowMs).toString()
         val locked = snap.fixtures.mapNotNull { fx ->
             val top = fx.markets.topPicks.firstOrNull() ?: return@mapNotNull null
-            val payload = "${fx.id}|${top.label}|${top.chancePct}|${fx.markets.modelVersion}|${fx.kickoffIso}"
-            LockedPickEntity(
-                hashSha256 = OddsMath.sha256Hex(payload),
+            val kickoffMs = runCatching { Instant.parse(fx.kickoffIso).toEpochMilli() }.getOrNull()
+            if (kickoffMs != null && kickoffMs <= nowMs) return@mapNotNull null
+            val hash = OddsMath.buildLockedPickHash(
                 fixtureId = fx.id,
+                pickLabel = top.label,
+                chancePct = top.chancePct,
+                modelVersion = fx.markets.modelVersion,
+                kickoffIso = fx.kickoffIso,
+            )
+            LockedPickEntity(
+                fixtureId = fx.id,
+                hashSha256 = hash,
                 sport = fx.sport.label,
                 matchup = "${fx.homeTeam} vs ${fx.awayTeam}",
                 pickLabel = top.label,
                 chancePct = top.chancePct,
                 modelVersion = fx.markets.modelVersion,
                 lockedAtIso = nowIso,
+                lockedAtEpochMs = nowMs,
             )
         }
-        if (locked.isNotEmpty()) db.dao().insertLockedPicks(locked)
+
+        db.withTransaction {
+            db.dao().saveSnapshot(
+                SnapshotEntity(
+                    id = 1,
+                    lastSyncEpochMs = snap.lastSyncEpochMs,
+                    isSeedData = snap.isSeedData,
+                    totalHistoricalMatches = snap.totalHistoricalMatches,
+                    payloadJson = SNAPSHOT_MARKER_FILE_BACKED,
+                )
+            )
+            if (locked.isNotEmpty()) db.dao().insertLockedPicks(locked)
+            if (oddsHistoryBatch.isNotEmpty()) db.dao().insertOddsHistory(oddsHistoryBatch)
+            db.dao().pruneOldOddsHistory(nowMs - 30L * 24L * 3600L * 1000L)
+        }
     }
 
-    private fun fetchText(url: String, fallbackUrl: String? = null): String {
-        fun call(u: String): String {
-            val req = Request.Builder()
-                .url(u)
-                .header("User-Agent", "EdgeLedgerAndroid/5.0 (Personal Offline Predictor)")
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) error("HTTP ${resp.code}")
-                return resp.body?.string() ?: error("Empty response")
+    private suspend fun executeCancellable(req: Request): Response = suspendCancellableCoroutine { cont ->
+        val call = client.newCall(req)
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                if (cont.isActive) {
+                    cont.resume(response)
+                } else {
+                    response.close()
+                }
+            }
+        })
+    }
+
+    private suspend fun readBoundedText(response: Response): String {
+        val stream = response.body?.byteStream() ?: throw IOException("Empty response")
+        val baos = ByteArrayOutputStream()
+        val buf = ByteArray(16 * 1024)
+        var total = 0
+        stream.use { input ->
+            while (true) {
+                val read = input.read(buf)
+                if (read <= 0) break
+                total += read
+                if (total > MAX_BODY_BYTES) throw IOException("Response exceeds 15 MB limit")
+                baos.write(buf, 0, read)
             }
         }
-        return try {
-            call(url)
-        } catch (e: Exception) {
-            if (fallbackUrl != null) call(fallbackUrl) else throw e
+        return baos.toString(Charsets.UTF_8.name())
+    }
+
+    private suspend fun fetchSingleUrl(url: String): String {
+        var attempt = 0
+        while (true) {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "EdgeLedgerAndroid/8.0 (Personal Offline Predictor)")
+                .build()
+            executeCancellable(req).use { resp ->
+                if (resp.code == 429 && attempt == 0) {
+                    val retrySec = resp.header("Retry-After")?.toLongOrNull()?.coerceIn(1L, 10L) ?: 2L
+                    attempt++
+                    delay(retrySec * 1000L)
+                } else if (!resp.isSuccessful) {
+                    throw IOException("HTTP ${resp.code}")
+                } else {
+                    return readBoundedText(resp)
+                }
+            }
         }
     }
 
-    private fun fetchWeatherForTeam(homeTeam: String): StadiumWeather? {
+    private suspend fun fetchText(url: String, fallbackUrl: String? = null): String {
+        return try {
+            fetchSingleUrl(url)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            if (fallbackUrl != null) fetchSingleUrl(fallbackUrl) else throw e
+        }
+    }
+
+    private suspend fun fetchWeatherForTeam(homeTeam: String): StadiumWeather? {
         val loc = SeedData.STADIUM_GPS[homeTeam] ?: return null
         if (loc.isDome) return StadiumWeather(loc.stadium, 21, 0, 0, "Indoor Dome")
-        return runCatching {
+        return try {
             val raw = fetchText(
                 "https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,wind_speed_10m,precipitation_probability&timezone=UTC"
             )
-            val cur = json.parseToJsonElement(raw).jsonObject["current"]?.jsonObject ?: return null
-            val temp = cur["temperature_2m"]?.jsonPrimitive?.doubleOrNull?.roundToInt() ?: 15
-            val wind = cur["wind_speed_10m"]?.jsonPrimitive?.doubleOrNull?.roundToInt() ?: 10
-            val rain = cur["precipitation_probability"]?.jsonPrimitive?.doubleOrNull?.roundToInt() ?: 15
+            val root = json.parseToJsonElement(raw) as? JsonObject ?: return null
+            val cur = root["current"] as? JsonObject ?: return null
+            val temp = (cur["temperature_2m"] as? JsonPrimitive)?.doubleOrNull?.roundToInt() ?: return null
+            val wind = (cur["wind_speed_10m"] as? JsonPrimitive)?.doubleOrNull?.roundToInt() ?: 0
+            val rain = (cur["precipitation_probability"] as? JsonPrimitive)?.doubleOrNull?.roundToInt() ?: 0
             val summary = when {
                 wind >= 28 -> "Windy (May affect passing/kicking)"
                 rain >= 55 -> "Rain Likely (Slick conditions)"
                 else -> "Clear / Normal"
             }
             StadiumWeather(loc.stadium, temp, wind, rain, summary)
-        }.getOrNull()
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            null
+        }
     }
 
-    /**
-     * Pulls all free 2026-audited keyless public sports feeds + optional user-entered API key
-     * feeds directly on-device, fits all models locally, and persists atomically to Room SQLite.
-     */
-    suspend fun runOnDeviceWeeklySync(): AppModelSnapshot = withContext(Dispatchers.IO) {
-        if (_syncing.value) return@withContext _snapshot.value
+    suspend fun runOnDeviceWeeklySync(): AppModelSnapshot {
+        runOnDeviceWeeklySyncWithStatus(manual = true)
+        return _snapshot.value
+    }
+
+    suspend fun runOnDeviceWeeklySyncWithStatus(manual: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+        if (!syncingLock.compareAndSet(false, true)) return@withContext true
         _syncing.value = true
+        _syncError.value = null
+        if (manual) circuitStates.clear()
         try {
+            prefsRepo.awaitLoaded()
             val now = Instant.now()
+            val nowMs = now.toEpochMilli()
             val today = LocalDate.now(ZoneOffset.UTC)
             val seasonStart = if (today.monthValue >= 7) today.year else today.year - 1
             val seasonCode = "${seasonStart.toString().takeLast(2)}${(seasonStart + 1).toString().takeLast(2)}"
+            val prevSeasonCode = "${(seasonStart - 1).toString().takeLast(2)}${seasonStart.toString().takeLast(2)}"
             val keys = prefsRepo.apiKeys.value
+            val userPrefs = prefsRepo.prefs.value
 
-            val liveHistory = mutableListOf<HistoricalMatch>()
-            val liveUpcoming = mutableListOf<RawUpcomingEvent>()
-            val liveStandingsProfiles = mutableMapOf<String, TeamProfile>()
-            val clubElo = SeedData.CLUB_ELO_ANCHOR.toMutableMap()
-            val health = mutableListOf<ProviderHealth>()
-            var okCount = 0
+            val liveHistory = java.util.Collections.synchronizedList(mutableListOf<HistoricalMatch>())
+            val liveUpcoming = java.util.Collections.synchronizedList(mutableListOf<RawUpcomingEvent>())
+            val liveStandingsProfiles = ConcurrentHashMap<String, TeamProfile>()
+            val clubElo = ConcurrentHashMap<String, Double>()
+            val health = java.util.Collections.synchronizedList(mutableListOf<ProviderHealth>())
+            val okCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
-            data class FeedSpec(val id: String, val name: String, val sport: Sport, val url: String, val fallback: String? = null, val action: (String) -> Int)
+            data class FeedSpec(
+                val id: String,
+                val name: String,
+                val sport: Sport,
+                val url: String,
+                val fallback: String? = null,
+                val action: (String) -> Int,
+            )
 
             val feeds = listOf(
-                FeedSpec("fd-e0", "Football-Data.co.uk (Premier League)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/E0.csv") { raw ->
+                FeedSpec("fd-e0", "Football-Data.co.uk (Premier League)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/E0.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/E0.csv") { raw ->
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "E0"); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("fd-sp1", "Football-Data.co.uk (La Liga)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/SP1.csv") { raw ->
+                FeedSpec("fd-sp1", "Football-Data.co.uk (La Liga)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/SP1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/SP1.csv") { raw ->
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SP1"); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("fd-d1", "Football-Data.co.uk (Bundesliga)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/D1.csv") { raw ->
+                FeedSpec("fd-d1", "Football-Data.co.uk (Bundesliga)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/D1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/D1.csv") { raw ->
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "D1"); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "http://api.clubelo.com/$today", "http://api.clubelo.com/${today.minusDays(1)}") { raw ->
+                FeedSpec("fd-i1", "Football-Data.co.uk (Serie A)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/I1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/I1.csv") { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "I1"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-f1", "Football-Data.co.uk (Ligue 1)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/F1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/F1.csv") { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "F1"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "https://api.clubelo.com/$today", "http://api.clubelo.com/${today.minusDays(1)}") { raw ->
                     val map = CsvAndFeedParsers.parseClubEloCsv(raw); clubElo.putAll(map); map.size
                 },
-                FeedSpec("espn-epl", "ESPN Premier League Fixtures", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard") { raw ->
+                FeedSpec("espn-epl", "ESPN Premier League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "E0", "Premier League")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-laliga", "ESPN La Liga Fixtures", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard") { raw ->
+                FeedSpec("espn-laliga", "ESPN La Liga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "SP1", "La Liga")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-bundesliga", "ESPN Bundesliga Fixtures", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard") { raw ->
+                FeedSpec("espn-bundesliga", "ESPN Bundesliga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "D1", "Bundesliga")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-seriea", "ESPN Serie A", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "I1", "Serie A")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-ligue1", "ESPN Ligue 1", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "F1", "Ligue 1")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
                 FeedSpec("nflverse", "nflverse NFL Games CSV", Sport.NFL, "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv") { raw ->
@@ -250,70 +424,78 @@ class SyncRepository(
                 FeedSpec("nhl-api", "Official NHL Web API", Sport.NHL, "https://api-web.nhle.com/v1/schedule/now") { raw ->
                     val u = CsvAndFeedParsers.parseNhlSchedule(raw); liveUpcoming.addAll(u); u.size
                 },
-                FeedSpec("nhl-standings", "Official NHL Standings API", Sport.NHL, "https://api-web.nhle.com/v1/standings/now") { raw ->
+                FeedSpec("nhl-standings", "Official NHL Standings", Sport.NHL, "https://api-web.nhle.com/v1/standings/now") { raw ->
                     val map = CsvAndFeedParsers.parseNhlStandings(raw); liveStandingsProfiles.putAll(map); map.size
                 },
-                FeedSpec("mlb-api", "Official MLB Stats API", Sport.MLB, "https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=$today") { raw ->
+                FeedSpec("mlb-api", "Official MLB Stats API", Sport.MLB, "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=$today&endDate=${today.plusDays(6)}") { raw ->
                     val u = CsvAndFeedParsers.parseMlbSchedule(raw); liveUpcoming.addAll(u); u.size
                 },
-                FeedSpec("tml-atp", "TennisMyLife ATP CSV", Sport.TENNIS, "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/${today.year}.csv") { raw ->
+                FeedSpec("tml-atp", "TennisMyLife ATP CSV", Sport.TENNIS, "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/${today.year}.csv", "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/${today.year - 1}.csv") { raw ->
                     val list = CsvAndFeedParsers.parseTmlTennisCsv(raw); liveHistory.addAll(list); list.size
                 },
             )
 
-            for (feed in feeds) {
-                val fails = failureCounts[feed.id] ?: 0
-                if (fails >= 3) {
-                    health.add(ProviderHealth(feed.id, feed.name, feed.sport, "CIRCUIT_OPEN", 0, now.toString(), "Paused after 3 failures"))
-                    continue
-                }
-                _syncStatusText.value = "Syncing ${feed.name}..."
-                try {
-                    val raw = fetchText(feed.url, feed.fallback)
-                    val count = feed.action(raw)
-                    failureCounts[feed.id] = 0
-                    okCount++
-                    val st = if (count == 0 && feed.id == "mlb-api") "OFF-SEASON" else "LIVE"
-                    val msg = if (st == "OFF-SEASON") "No scheduled games (Off-Season)" else "$count records parsed on-device"
-                    health.add(ProviderHealth(feed.id, feed.name, feed.sport, st, count, now.toString(), msg))
-                } catch (e: Exception) {
-                    failureCounts[feed.id] = fails + 1
-                    health.add(ProviderHealth(feed.id, feed.name, feed.sport, "OFFLINE", 0, now.toString(), e.message ?: "Offline fallback"))
-                }
+            _syncStatusText.value = "Syncing live public datasets..."
+            val sem = Semaphore(6)
+            coroutineScope {
+                feeds.map { feed ->
+                    async {
+                        sem.withPermit {
+                            val cs = circuitStates[feed.id]
+                            if (cs != null && cs.consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD && (nowMs - cs.openedAtEpochMs) < CIRCUIT_COOLDOWN_MS) {
+                                health.add(ProviderHealth(feed.id, feed.name, feed.sport, "CIRCUIT_OPEN", 0, now.toString(), "Cooling down (15 min)"))
+                                return@withPermit
+                            }
+                            try {
+                                val raw = fetchText(feed.url, feed.fallback)
+                                val count = feed.action(raw)
+                                circuitStates.remove(feed.id)
+                                okCounter.incrementAndGet()
+                                val st = if (count == 0 && feed.id == "mlb-api") "OFF-SEASON" else "LIVE"
+                                val msg = if (st == "OFF-SEASON") "No scheduled games (Off-Season)" else "$count records parsed"
+                                health.add(ProviderHealth(feed.id, feed.name, feed.sport, st, count, now.toString(), msg))
+                            } catch (ce: CancellationException) {
+                                throw ce
+                            } catch (e: Exception) {
+                                val prevFails = circuitStates[feed.id]?.consecutiveFailures ?: 0
+                                circuitStates[feed.id] = CircuitState(prevFails + 1, nowMs)
+                                health.add(ProviderHealth(feed.id, feed.name, feed.sport, "OFFLINE", 0, now.toString(), e.message?.take(80) ?: "Unavailable"))
+                            }
+                        }
+                    }
+                }.awaitAll()
             }
 
-            // Optional User-Keyed Feeds + Keyless Prediction Markets
-            val liveOddsByMatch = mutableMapOf<String, List<com.edgeledger.app.model.BookmakerOddsLine>>()
-
+            val liveOddsByMatch = mutableMapOf<String, List<BookmakerOddsLine>>()
             if (keys.theOddsApiKey.isNotBlank()) {
                 _syncStatusText.value = "Fetching live odds (The Odds API)..."
-                val oddsSports = listOf("soccer_epl", "americanfootball_nfl", "basketball_nba", "icehockey_nhl")
+                val oddsSports = listOf("soccer_epl", "soccer_spain_la_liga", "soccer_germany_bundesliga", "americanfootball_nfl", "basketball_nba", "icehockey_nhl")
                 var matchedEvents = 0
                 for (spKey in oddsSports) {
                     val map = optionalClient.fetchTheOddsApi(spKey, keys.theOddsApiKey)
                     liveOddsByMatch.putAll(map)
                     matchedEvents += map.size
                 }
-                if (matchedEvents > 0) okCount++
+                if (matchedEvents > 0) okCounter.incrementAndGet()
                 health.add(
                     ProviderHealth(
                         "the-odds-api",
-                        "The Odds API (Live Bookmakers)",
+                        "The Odds API",
                         Sport.FOOTBALL,
                         if (matchedEvents > 0) "LIVE" else "OFFLINE",
                         matchedEvents,
                         now.toString(),
-                        if (matchedEvents > 0) "$matchedEvents matchups with live bookmaker odds" else "Check API key or monthly credits",
+                        if (matchedEvents > 0) "$matchedEvents matchups with live odds" else "Check key or credits",
                     )
                 )
             }
 
             if (keys.footballDataOrgKey.isNotBlank()) {
-                _syncStatusText.value = "Fetching Football-Data.org fixtures..."
+                _syncStatusText.value = "Fetching Football-Data.org..."
                 val fdEvents = optionalClient.fetchFootballDataOrgFixtures(keys.footballDataOrgKey)
                 if (fdEvents.isNotEmpty()) {
                     liveUpcoming.addAll(fdEvents)
-                    okCount++
+                    okCounter.incrementAndGet()
                 }
                 health.add(
                     ProviderHealth(
@@ -323,17 +505,51 @@ class SyncRepository(
                         if (fdEvents.isNotEmpty()) "LIVE" else "OFFLINE",
                         fdEvents.size,
                         now.toString(),
-                        if (fdEvents.isNotEmpty()) "${fdEvents.size} official fixtures loaded" else "No scheduled matches returned",
+                        if (fdEvents.isNotEmpty()) "${fdEvents.size} official fixtures" else "No scheduled matches",
+                    )
+                )
+            }
+
+            if (keys.oddsPapiKey.isNotBlank()) {
+                _syncStatusText.value = "Checking OddsPapi v4..."
+                val opFixtures = optionalClient.fetchOddsPapiFixtures(keys.oddsPapiKey)
+                if (opFixtures.isNotEmpty()) okCounter.incrementAndGet()
+                health.add(
+                    ProviderHealth(
+                        "oddspapi",
+                        "OddsPapi v4",
+                        Sport.FOOTBALL,
+                        if (opFixtures.isNotEmpty()) "LIVE" else "OFFLINE",
+                        opFixtures.size,
+                        now.toString(),
+                        if (opFixtures.isNotEmpty()) "${opFixtures.size} sharp fixtures" else "Check key or quota",
+                    )
+                )
+            }
+
+            if (keys.apiSportsKey.isNotBlank()) {
+                _syncStatusText.value = "Checking API-Sports status..."
+                val statusObj = optionalClient.fetchApiSportsJson(keys.apiSportsKey)
+                if (statusObj != null) okCounter.incrementAndGet()
+                health.add(
+                    ProviderHealth(
+                        "api-sports",
+                        "API-Sports",
+                        Sport.FOOTBALL,
+                        if (statusObj != null) "LIVE" else "OFFLINE",
+                        if (statusObj != null) 1 else 0,
+                        now.toString(),
+                        if (statusObj != null) "API-Sports authenticated" else "Check API-Sports key",
                     )
                 )
             }
 
             if (keys.cricketDataKey.isNotBlank()) {
-                _syncStatusText.value = "Fetching CricketData.org matches..."
+                _syncStatusText.value = "Fetching CricketData.org..."
                 val criEvents = optionalClient.fetchCricketMatches(keys.cricketDataKey)
                 if (criEvents.isNotEmpty()) {
                     liveUpcoming.addAll(criEvents)
-                    okCount++
+                    okCounter.incrementAndGet()
                 }
                 health.add(
                     ProviderHealth(
@@ -343,18 +559,16 @@ class SyncRepository(
                         if (criEvents.isNotEmpty()) "LIVE" else "OFFLINE",
                         criEvents.size,
                         now.toString(),
-                        if (criEvents.isNotEmpty()) "${criEvents.size} cricket fixtures loaded" else "No active cricket matches",
+                        if (criEvents.isNotEmpty()) "${criEvents.size} cricket fixtures" else "No active matches",
                     )
                 )
             }
 
             val livePredictionMarkets = mutableListOf<PredictionMarketQuote>()
-
             if (keys.enablePolymarket) {
-                _syncStatusText.value = "Syncing Polymarket public odds..."
                 val pm = optionalClient.fetchPolymarketOdds()
                 if (pm.isNotEmpty()) {
-                    okCount++
+                    okCounter.incrementAndGet()
                     pm.take(20).forEach { (q, prob) ->
                         val yp = (prob * 100.0).roundToInt().coerceIn(1, 99)
                         livePredictionMarkets.add(PredictionMarketQuote("Polymarket", q, yp, 100 - yp))
@@ -363,21 +577,20 @@ class SyncRepository(
                 health.add(
                     ProviderHealth(
                         "polymarket",
-                        "Polymarket Public Markets",
+                        "Polymarket Sports",
                         Sport.FOOTBALL,
                         if (pm.isNotEmpty()) "LIVE" else "OFFLINE",
                         pm.size,
                         now.toString(),
-                        if (pm.isNotEmpty()) "${pm.size} open public markets synced" else "Offline fallback",
+                        if (pm.isNotEmpty()) "${pm.size} sports markets" else "Unavailable",
                     )
                 )
             }
 
             if (keys.enableKalshi) {
-                _syncStatusText.value = "Syncing Kalshi public markets..."
                 val ka = optionalClient.fetchKalshiOdds()
                 if (ka.isNotEmpty()) {
-                    okCount++
+                    okCounter.incrementAndGet()
                     ka.take(20).forEach { (q, prob) ->
                         val yp = (prob * 100.0).roundToInt().coerceIn(1, 99)
                         livePredictionMarkets.add(PredictionMarketQuote("Kalshi", q, yp, 100 - yp))
@@ -386,22 +599,25 @@ class SyncRepository(
                 health.add(
                     ProviderHealth(
                         "kalshi",
-                        "Kalshi Public Market Data",
+                        "Kalshi Sports",
                         Sport.FOOTBALL,
                         if (ka.isNotEmpty()) "LIVE" else "OFFLINE",
                         ka.size,
                         now.toString(),
-                        if (ka.isNotEmpty()) "${ka.size} open exchange markets synced" else "Offline fallback",
+                        if (ka.isNotEmpty()) "${ka.size} sports markets" else "Unavailable",
                     )
                 )
             }
 
             _providerQuotas.value = optionalClient.getQuotaSummary(keys)
 
-            _syncStatusText.value = "Fitting models & weather..."
-            // 100% Live Dataset Policy: never inject synthetic seed games once live data is synced!
-            val mergedHistory = liveHistory
-            val cutoffMs = now.toEpochMilli() - 3L * 3600L * 1000L
+            val okCount = okCounter.get()
+            if (okCount == 0) {
+                _syncError.value = "All live feeds are unreachable. Showing last cached slate."
+                return@withContext false
+            }
+
+            val cutoffMs = nowMs - 3L * 3600L * 1000L
             val baseUpcoming = liveUpcoming
                 .distinctBy { "${it.sport.name}|${it.homeTeam}|${it.awayTeam}|${it.kickoffIso.take(10)}" }
                 .filter { ev ->
@@ -409,86 +625,166 @@ class SyncRepository(
                     ts == null || ts >= cutoffMs
                 }
 
-            // Attach live bookmaker odds from The Odds API when matched by home/away team
             val upcomingWithOdds = baseUpcoming.map { ev ->
-                val normKey = "${ev.homeTeam.trim().lowercase()}::${ev.awayTeam.trim().lowercase()}"
+                val normKey = "${ev.homeTeam.trim().lowercase(Locale.US)}::${ev.awayTeam.trim().lowercase(Locale.US)}"
                 val liveLines = liveOddsByMatch[normKey]
-                if (!liveLines.isNullOrEmpty()) {
-                    ev.copy(bookOdds = liveLines + ev.bookOdds)
-                } else {
-                    ev
-                }
+                if (!liveLines.isNullOrEmpty()) ev.copy(bookOdds = liveLines + ev.bookOdds) else ev
             }
 
-            // Fetch live 2026-27 team rosters directly on-device for upcoming fixtures (zero stale transfers!)
-            val liveRosters = mutableMapOf<String, List<LivePlayerEntry>>()
-            _syncStatusText.value = "Syncing live 2026-27 team rosters..."
-            val fetchedKeys = mutableSetOf<String>()
-            for (ev in upcomingWithOdds.take(24)) {
-                val hKey = PredictionEngine.profileKey(ev.sport, ev.homeTeam)
-                val aKey = PredictionEngine.profileKey(ev.sport, ev.awayTeam)
-                if (ev.homeLeaders.isNotEmpty()) liveRosters[hKey] = ev.homeLeaders
-                if (ev.awayLeaders.isNotEmpty()) liveRosters[aKey] = ev.awayLeaders
-
-                fun fetchTeamRoster(sport: Sport, teamName: String, teamId: String?, key: String) {
-                    if (teamId.isNullOrBlank() || key in fetchedKeys) return
-                    fetchedKeys.add(key)
-                    val espnPath = when {
-                        sport == Sport.FOOTBALL && ev.leagueId == "SP1" -> "soccer/esp.1"
-                        sport == Sport.FOOTBALL && ev.leagueId == "D1" -> "soccer/ger.1"
-                        sport == Sport.FOOTBALL -> "soccer/eng.1"
-                        sport == Sport.NBA -> "basketball/nba"
-                        sport == Sport.NFL -> "football/nfl"
-                        else -> null
-                    }
-                    runCatching {
-                        val players = when {
-                            espnPath != null -> {
-                                val raw = fetchText(
-                                    "https://site.web.api.espn.com/apis/site/v2/sports/$espnPath/teams/$teamId/roster",
-                                    "https://site.api.espn.com/apis/site/v2/sports/$espnPath/teams/$teamId/roster",
-                                )
-                                CsvAndFeedParsers.parseEspnRoster(raw)
-                            }
-                            sport == Sport.NHL -> {
-                                val raw = fetchText("https://api-web.nhle.com/v1/roster/$teamId/current")
-                                CsvAndFeedParsers.parseNhlRoster(raw)
-                            }
-                            else -> emptyList()
-                        }
-                        if (players.isNotEmpty()) {
-                            val existing = liveRosters[key].orEmpty()
-                            liveRosters[key] = (existing + players).distinctBy { it.name.lowercase() }
+            val liveRosters = ConcurrentHashMap<String, List<LivePlayerEntry>>()
+            _syncStatusText.value = "Syncing live team rosters..."
+            val fetchedKeys = ConcurrentHashMap.newKeySet<String>()
+            coroutineScope {
+                upcomingWithOdds.flatMap { ev ->
+                    val hKey = PredictionEngine.profileKey(ev.sport, ev.homeTeam)
+                    val aKey = PredictionEngine.profileKey(ev.sport, ev.awayTeam)
+                    if (ev.homeLeaders.isNotEmpty()) liveRosters[hKey] = ev.homeLeaders
+                    if (ev.awayLeaders.isNotEmpty()) liveRosters[aKey] = ev.awayLeaders
+                    listOf(
+                        Triple(ev, ev.homeTeamId, hKey),
+                        Triple(ev, ev.awayTeamId, aKey),
+                    )
+                }.mapNotNull { (ev, teamId, key) ->
+                    if (teamId.isNullOrBlank() || !fetchedKeys.add(key)) return@mapNotNull null
+                    async {
+                        sem.withPermit {
+                            fetchRosterForTeam(ev.sport, ev.leagueId, teamId, key, liveRosters)
                         }
                     }
-                }
-
-                fetchTeamRoster(ev.sport, ev.homeTeam, ev.homeTeamId, hKey)
-                fetchTeamRoster(ev.sport, ev.awayTeam, ev.awayTeamId, aKey)
+                }.awaitAll()
             }
 
-            val snap = compileSnapshot(
-                history = mergedHistory,
-                upcoming = upcomingWithOdds,
-                clubElo = clubElo,
-                health = health,
-                isSeed = okCount == 0,
-                fetchLiveWeather = okCount > 0,
-                now = now,
-                predictionMarkets = livePredictionMarkets,
-                extraProfiles = liveStandingsProfiles,
-                liveRosters = liveRosters,
-            )
+            _syncStatusText.value = "Fetching live stadium weather..."
+            val weatherMap = ConcurrentHashMap<String, StadiumWeather>()
+            coroutineScope {
+                upcomingWithOdds
+                    .filter { it.sport == Sport.FOOTBALL || it.sport == Sport.NFL }
+                    .map { it.homeTeam }
+                    .distinct()
+                    .map { homeTeam ->
+                        async {
+                            sem.withPermit {
+                                fetchWeatherForTeam(homeTeam)?.let { weatherMap[homeTeam] = it }
+                            }
+                        }
+                    }.awaitAll()
+            }
+
+            // Batch-load prior Room odds history for all upcoming fixtures
+            val allFixtureIds = upcomingWithOdds.map { it.id }
+            val priorGrouped = if (allFixtureIds.isNotEmpty()) {
+                runCatching { db.dao().getOddsHistoryForFixtures(allFixtureIds) }
+                    .getOrDefault(emptyList())
+                    .groupBy { it.fixtureId }
+            } else {
+                emptyMap()
+            }
+
+            val oddsHistoryMap = HashMap<String, List<OddsHistoryEntity>>()
+            val newOddsSnapshots = mutableListOf<OddsHistoryEntity>()
+            val timeLabel = ODDS_TIME_FMT.format(now)
+
+            for (ev in upcomingWithOdds) {
+                val sharp = ev.bookOdds.firstOrNull { it.isSharp } ?: ev.bookOdds.firstOrNull()
+                val retail = ev.bookOdds.firstOrNull { !it.isSharp } ?: sharp
+                val newEntry = sharp?.let { s ->
+                    val sProb = OddsMath.deVig(s.homeOdds, s.awayOdds, s.drawOdds, userPrefs.devigMethod).fairHome * 100.0
+                    val rProb = retail?.let { r ->
+                        OddsMath.deVig(r.homeOdds, r.awayOdds, r.drawOdds, userPrefs.devigMethod).fairHome * 100.0
+                    } ?: sProb
+                    OddsHistoryEntity(
+                        fixtureId = ev.id,
+                        recordedAtEpochMs = nowMs,
+                        label = timeLabel,
+                        homeProbPct = sProb,
+                        sharpHomeProbPct = sProb,
+                        retailHomeProbPct = rProb,
+                    )
+                }
+                if (newEntry != null) newOddsSnapshots.add(newEntry)
+                val prior = priorGrouped[ev.id].orEmpty()
+                val combined = if (newEntry != null) prior + newEntry else prior
+                if (combined.size >= 2) oddsHistoryMap[ev.id] = combined
+            }
+
+            _syncStatusText.value = "Running on-device prediction models..."
+            val snap = withContext(Dispatchers.Default) {
+                compileSnapshot(
+                    history = liveHistory.toList(),
+                    upcoming = upcomingWithOdds,
+                    clubElo = clubElo.toMap(),
+                    health = health.toList(),
+                    now = now,
+                    predictionMarkets = livePredictionMarkets,
+                    standingsProfiles = liveStandingsProfiles.toMap(),
+                    liveRosters = liveRosters.toMap(),
+                    weatherByHomeTeam = weatherMap.toMap(),
+                    oddsHistoryByFixture = oddsHistoryMap,
+                )
+            }
+
             _snapshot.value = snap
-            persistSnapshot(snap)
-            snap
+            persistSnapshot(snap, newOddsSnapshots)
+            runCatching { TopPicksWidget().updateAll(appContext) }
+            true
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            _syncError.value = e.message?.take(120) ?: "Sync failed"
+            false
         } finally {
+            syncingLock.set(false)
             _syncing.value = false
             _syncStatusText.value = ""
         }
     }
 
-    private fun buildOfflineSeedSnapshot(): AppModelSnapshot {
+    private suspend fun fetchRosterForTeam(
+        sport: Sport,
+        leagueId: String,
+        teamId: String,
+        key: String,
+        liveRosters: ConcurrentHashMap<String, List<LivePlayerEntry>>,
+    ) {
+        val espnPath = when {
+            sport == Sport.FOOTBALL && leagueId == "E0" -> "soccer/eng.1"
+            sport == Sport.FOOTBALL && leagueId == "E1" -> "soccer/eng.2"
+            sport == Sport.FOOTBALL && leagueId == "SP1" -> "soccer/esp.1"
+            sport == Sport.FOOTBALL && leagueId == "D1" -> "soccer/ger.1"
+            sport == Sport.FOOTBALL && leagueId == "I1" -> "soccer/ita.1"
+            sport == Sport.FOOTBALL && leagueId == "F1" -> "soccer/fra.1"
+            sport == Sport.NBA -> "basketball/nba"
+            sport == Sport.NFL -> "football/nfl"
+            else -> null
+        }
+        try {
+            val players = when {
+                espnPath != null -> {
+                    val primaryUrl = "https://site.web.api.espn.com/apis/site/v2/sports/$espnPath/teams/"
+                        .toHttpUrl().newBuilder().addPathSegment(teamId).addPathSegment("roster").build().toString()
+                    val fallbackUrl = "https://site.api.espn.com/apis/site/v2/sports/$espnPath/teams/"
+                        .toHttpUrl().newBuilder().addPathSegment(teamId).addPathSegment("roster").build().toString()
+                    CsvAndFeedParsers.parseEspnRoster(fetchText(primaryUrl, fallbackUrl))
+                }
+                sport == Sport.NHL -> {
+                    val url = "https://api-web.nhle.com/v1/roster/"
+                        .toHttpUrl().newBuilder().addPathSegment(teamId).addPathSegment("current").build().toString()
+                    CsvAndFeedParsers.parseNhlRoster(fetchText(url))
+                }
+                else -> emptyList()
+            }
+            if (players.isNotEmpty()) {
+                val existing = liveRosters[key].orEmpty()
+                liveRosters[key] = (existing + players).distinctBy { it.name.lowercase(Locale.ROOT) }
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            // Non-fatal per-team roster miss
+        }
+    }
+
+    private fun buildEmptyReadySnapshot(): AppModelSnapshot {
         val now = Instant.now()
         return AppModelSnapshot(
             lastSyncEpochMs = 0L,
@@ -498,7 +794,15 @@ class SyncRepository(
             profiles = emptyMap(),
             trackRecords = emptyList(),
             providerHealth = listOf(
-                ProviderHealth("live-sync", "Live Public Datasets", Sport.FOOTBALL, "READY", 0, now.toString(), "Tap Update to download live 2026-27 datasets on your phone"),
+                ProviderHealth(
+                    "live-sync",
+                    "Live Public Datasets",
+                    Sport.FOOTBALL,
+                    "READY",
+                    0,
+                    now.toString(),
+                    "Tap Update to download live sports datasets on your device",
+                ),
             ),
             predictionMarkets = emptyList(),
             liveRosters = emptyMap(),
@@ -510,32 +814,50 @@ class SyncRepository(
         upcoming: List<RawUpcomingEvent>,
         clubElo: Map<String, Double>,
         health: List<ProviderHealth>,
-        isSeed: Boolean,
-        fetchLiveWeather: Boolean,
         now: Instant,
-        predictionMarkets: List<PredictionMarketQuote> = emptyList(),
-        extraProfiles: Map<String, TeamProfile> = emptyMap(),
-        liveRosters: Map<String, List<LivePlayerEntry>> = emptyMap(),
+        predictionMarkets: List<PredictionMarketQuote>,
+        standingsProfiles: Map<String, TeamProfile>,
+        liveRosters: Map<String, List<LivePlayerEntry>>,
+        weatherByHomeTeam: Map<String, StadiumWeather>,
+        oddsHistoryByFixture: Map<String, List<OddsHistoryEntity>>,
     ): AppModelSnapshot {
         val userPrefs = prefsRepo.prefs.value
-        val rawProfiles = (PredictionEngine.buildTeamProfiles(history, clubElo) + extraProfiles).toMutableMap()
+        val historicalProfiles = PredictionEngine.buildTeamProfiles(history, clubElo)
+        val mergedProfiles = historicalProfiles.toMutableMap()
+
+        for ((k, sp) in standingsProfiles) {
+            val existing = mergedProfiles[k]
+            mergedProfiles[k] = if (existing == null || existing.gamesPlayed < sp.gamesPlayed) {
+                sp.copy(
+                    elo = if (existing != null && existing.gamesPlayed >= 5) existing.elo else sp.elo,
+                    logoUrl = sp.logoUrl ?: existing?.logoUrl,
+                )
+            } else {
+                existing.copy(logoUrl = existing.logoUrl ?: sp.logoUrl)
+            }
+        }
+
         for (ev in upcoming) {
             val hKey = PredictionEngine.profileKey(ev.sport, ev.homeTeam)
             val aKey = PredictionEngine.profileKey(ev.sport, ev.awayTeam)
             if (!ev.homeLogoUrl.isNullOrBlank()) {
-                rawProfiles[hKey]?.let { if (it.logoUrl.isNullOrBlank()) rawProfiles[hKey] = it.copy(logoUrl = ev.homeLogoUrl) }
+                mergedProfiles[hKey]?.let { if (it.logoUrl.isNullOrBlank()) mergedProfiles[hKey] = it.copy(logoUrl = ev.homeLogoUrl) }
             }
             if (!ev.awayLogoUrl.isNullOrBlank()) {
-                rawProfiles[aKey]?.let { if (it.logoUrl.isNullOrBlank()) rawProfiles[aKey] = it.copy(logoUrl = ev.awayLogoUrl) }
+                mergedProfiles[aKey]?.let { if (it.logoUrl.isNullOrBlank()) mergedProfiles[aKey] = it.copy(logoUrl = ev.awayLogoUrl) }
             }
         }
-        val profiles = rawProfiles.toMap()
+        val profiles = mergedProfiles.toMap()
 
         val trackRecords = history.groupBy { it.sport to it.leagueId }
             .filter { it.value.size >= 12 }
             .map { (key, matches) ->
-                val cleanName = readableLeagueName(key.second, key.first)
-                PredictionEngine.runWalkForwardBacktest(key.first, key.second, cleanName, matches)
+                PredictionEngine.runWalkForwardBacktest(
+                    sport = key.first,
+                    leagueId = key.second,
+                    leagueName = readableLeagueName(key.second, key.first),
+                    matches = matches,
+                )
             }
             .sortedByDescending { it.accuracyScore }
 
@@ -559,11 +881,6 @@ class SyncRepository(
                 marketBlendWeight = userPrefs.marketBlendWeight,
             )
 
-            val retailLine = ev.bookOdds.firstOrNull { !it.isSharp } ?: sharpLine
-            val retailFairHome = retailLine?.let {
-                OddsMath.deVig(it.homeOdds, it.awayOdds, it.drawOdds, userPrefs.devigMethod).fairHome
-            } ?: sharpFairHome ?: markets.probHome
-
             val h2h = history.filter {
                 it.sport == ev.sport &&
                     ((it.homeTeam == ev.homeTeam && it.awayTeam == ev.awayTeam) ||
@@ -573,13 +890,7 @@ class SyncRepository(
             }
 
             val insights = PredictionEngine.generatePlainInsights(pH, pA, h2h, ev.sport, markets)
-            val weather = if (fetchLiveWeather && (ev.sport == Sport.FOOTBALL || ev.sport == Sport.NFL)) {
-                fetchWeatherForTeam(ev.homeTeam)
-            } else {
-                SeedData.STADIUM_GPS[ev.homeTeam]?.let {
-                    StadiumWeather(it.stadium, 16, 11, 15, if (it.isDome) "Indoor Dome" else "Typical Conditions (Tap Update for live)")
-                }
-            }
+            val weather = weatherByHomeTeam[ev.homeTeam]
 
             val bestEval = sharpLine?.let { line ->
                 OddsMath.evaluateSides(
@@ -605,8 +916,11 @@ class SyncRepository(
             val aFormScore = (pA?.recentForm ?: emptyList()).takeLast(5).sumOf { if (it == "W") 1.0 else if (it == "D") 0.45 else 0.0 }
             val hasWeatherImpact = (weather?.windKmh ?: 0) >= 24 || (weather?.rainChancePct ?: 0) >= 55
 
-            val hLive = (ev.homeLeaders + liveRosters[PredictionEngine.profileKey(ev.sport, ev.homeTeam)].orEmpty()).distinctBy { it.name.lowercase() }
-            val aLive = (ev.awayLeaders + liveRosters[PredictionEngine.profileKey(ev.sport, ev.awayTeam)].orEmpty()).distinctBy { it.name.lowercase() }
+            val hLive = (ev.homeLeaders + liveRosters[PredictionEngine.profileKey(ev.sport, ev.homeTeam)].orEmpty())
+                .distinctBy { it.name.lowercase(Locale.ROOT) }
+            val aLive = (ev.awayLeaders + liveRosters[PredictionEngine.profileKey(ev.sport, ev.awayTeam)].orEmpty())
+                .distinctBy { it.name.lowercase(Locale.ROOT) }
+
             val playerProps = PlayerPropsEngine.generatePlayerProps(
                 sport = ev.sport,
                 homeTeam = ev.homeTeam,
@@ -617,6 +931,7 @@ class SyncRepository(
                 awayPower = aPower,
                 liveHomePlayers = hLive,
                 liveAwayPlayers = aLive,
+                fixtureId = ev.id,
             )
             val featureDrivers = PlayerPropsEngine.computeFeatureDrivers(
                 sport = ev.sport,
@@ -630,15 +945,9 @@ class SyncRepository(
                 awayFormScore = aFormScore,
                 hasWindOrRain = hasWeatherImpact,
             )
-            val lineMovement = if (ev.bookOdds.size >= 2 && sharpFairHome != null) {
-                PlayerPropsEngine.buildLineMovementSeries(
-                    fixtureId = ev.id,
-                    currentSharpHomeProb = sharpFairHome,
-                    currentRetailHomeProb = retailFairHome,
-                )
-            } else {
-                emptyList()
-            }
+            val lineMovement = PlayerPropsEngine.buildRealLineMovementSeries(
+                history = oddsHistoryByFixture[ev.id].orEmpty(),
+            )
             val sampleSize = minOf(pH?.gamesPlayed ?: 4, pA?.gamesPlayed ?: 4)
             val (rangeLow, rangeHigh) = PlayerPropsEngine.computeUncertaintyInterval(markets.probHome, sampleSize)
 
@@ -672,7 +981,7 @@ class SyncRepository(
 
         return AppModelSnapshot(
             lastSyncEpochMs = now.toEpochMilli(),
-            isSeedData = isSeed,
+            isSeedData = false,
             totalHistoricalMatches = history.size,
             fixtures = fixtures,
             profiles = profiles,

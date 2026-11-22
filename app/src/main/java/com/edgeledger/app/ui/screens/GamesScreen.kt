@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -33,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,17 +52,18 @@ import com.edgeledger.app.model.Sport
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.theme.FixtureLayoutMode
 import com.edgeledger.app.ui.components.FormDots
-import com.edgeledger.app.ui.components.formatLocalKickoff
 import com.edgeledger.app.ui.components.ProbBar
 import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatusBadge
 import com.edgeledger.app.ui.components.TeamAvatar
 import com.edgeledger.app.ui.components.TokenPill
+import com.edgeledger.app.ui.components.formatLocalKickoff
 import com.edgeledger.app.ui.components.scaledSp
 import com.edgeledger.app.ui.components.shortTeamName
 import com.edgeledger.app.ui.components.tabularStyle
 import kotlinx.coroutines.launch
 import java.time.Instant
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -82,14 +85,17 @@ fun GamesScreen(
     val snapshot by app.syncRepo.snapshot.collectAsStateWithLifecycle()
     val syncing by app.syncRepo.syncing.collectAsStateWithLifecycle()
     val syncText by app.syncRepo.syncStatusText.collectAsStateWithLifecycle()
+    val syncError by app.syncRepo.syncError.collectAsStateWithLifecycle()
     val prefs by app.prefsRepo.prefs.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
-    var selectedSport by remember { mutableStateOf<Sport?>(null) }
-    var strongOnly by remember { mutableStateOf(false) }
-    var valueOnly by remember { mutableStateOf(false) }
-    var favoritesOnly by remember { mutableStateOf(false) }
-    var sortMode by remember { mutableStateOf(GameSortMode.BEST_PICK) }
+    var selectedSportName by rememberSaveable { mutableStateOf<String?>(null) }
+    val selectedSport = selectedSportName?.let { runCatching { Sport.valueOf(it) }.getOrNull() }
+    var strongOnly by rememberSaveable { mutableStateOf(false) }
+    var valueOnly by rememberSaveable { mutableStateOf(false) }
+    var favoritesOnly by rememberSaveable { mutableStateOf(false) }
+    var sortModeName by rememberSaveable { mutableStateOf(GameSortMode.BEST_PICK.name) }
+    val sortMode = runCatching { GameSortMode.valueOf(sortModeName) }.getOrDefault(GameSortMode.BEST_PICK)
 
     val daysOld = if (snapshot.lastSyncEpochMs <= 0L) 0L else ((Instant.now().toEpochMilli() - snapshot.lastSyncEpochMs) / 86_400_000L).coerceAtLeast(0L)
     val filtered = remember(snapshot.fixtures, snapshot.profiles, selectedSport, strongOnly, valueOnly, favoritesOnly, prefs.pinnedTeams, sortMode) {
@@ -113,7 +119,6 @@ fun GamesScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Offline Weekly Update Hero Header
         Surface(
             color = Color.Transparent,
             border = BorderStroke(1.dp, c.border),
@@ -171,40 +176,58 @@ fun GamesScreen(
             }
         }
 
-        // Sport + Saved Preset Filter Pills (EN-02)
+        if (!syncError.isNullOrBlank()) {
+            Surface(
+                color = c.lossDim,
+                border = BorderStroke(1.dp, c.loss.copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = tokens.spacing.screenPadding, vertical = 6.dp),
+                shape = tokens.shapes.medium,
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(syncError.orEmpty(), color = c.loss, fontSize = scaledSp(12f), fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { app.syncRepo.clearSyncError() }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Outlined.Close, contentDescription = "Dismiss sync error", tint = c.loss, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+
         LazyRow(
             contentPadding = PaddingValues(horizontal = tokens.spacing.screenPadding, vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item {
+            item(key = "all") {
                 TokenPill("All Sports", selectedSport == null && !favoritesOnly && !valueOnly && !strongOnly, {
-                    selectedSport = null; favoritesOnly = false; valueOnly = false; strongOnly = false
+                    selectedSportName = null; favoritesOnly = false; valueOnly = false; strongOnly = false
                 })
             }
-            item {
+            item(key = "fav") {
                 TokenPill("Favorites (${prefs.pinnedTeams.size})", favoritesOnly, { favoritesOnly = !favoritesOnly }, activeColor = c.draw, activeContainer = c.drawDim)
             }
-            item {
+            item(key = "val") {
                 TokenPill("Good Value", valueOnly, { valueOnly = !valueOnly }, activeColor = c.valueHighlight, activeContainer = c.valueHighlightDim)
             }
-            item {
+            item(key = "strong") {
                 TokenPill("Strong Picks", strongOnly, { strongOnly = !strongOnly }, activeColor = c.win, activeContainer = c.winDim)
             }
-            items(Sport.entries) { sp ->
-                TokenPill(sp.label, selectedSport == sp, { selectedSport = if (selectedSport == sp) null else sp })
+            items(Sport.entries, key = { it.name }) { sp ->
+                TokenPill(sp.label, selectedSport == sp, { selectedSportName = if (selectedSport == sp) null else sp.name })
             }
         }
 
-        // Sort Bar
         LazyRow(
             contentPadding = PaddingValues(horizontal = tokens.spacing.screenPadding, vertical = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(GameSortMode.entries) { sm ->
+            items(GameSortMode.entries, key = { it.name }) { sm ->
                 TokenPill(
                     label = sm.label,
                     selected = sortMode == sm,
-                    onClick = { sortMode = sm },
+                    onClick = { sortModeName = sm.name },
                     activeColor = c.sharpBadge,
                     activeContainer = c.sharpBadgeDim,
                 )
@@ -221,7 +244,11 @@ fun GamesScreen(
                     SectionCard {
                         Text("No matching games for this filter", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         Text(
-                            if (favoritesOnly) "Tap the star icon on any game card to pin your favorite teams." else "Tap All Sports to see every upcoming game.",
+                            when {
+                                snapshot.fixtures.isEmpty() -> "Tap Update above to sync live upcoming fixtures and historical datasets."
+                                favoritesOnly -> "Tap the star icon on any game card to pin your favorite teams."
+                                else -> "Tap All Sports to see every upcoming game."
+                            },
                             color = c.textMuted,
                             fontSize = scaledSp(13f),
                         )
@@ -230,30 +257,29 @@ fun GamesScreen(
             } else {
                 items(filtered, key = { it.id }) { fx ->
                     val isPinned = fx.homeTeam in prefs.pinnedTeams || fx.awayTeam in prefs.pinnedTeams
+                    val onTogglePin = {
+                        if (fx.homeTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.homeTeam)
+                        else if (fx.awayTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.awayTeam)
+                        else app.prefsRepo.togglePinTeam(fx.homeTeam)
+                    }
                     if (tokens.fixtureLayout == FixtureLayoutMode.COMPACT_ROW) {
                         CompactFixtureRow(
                             fixture = fx,
                             isPinned = isPinned,
-                            onTogglePin = {
-                                if (fx.homeTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.homeTeam)
-                                else if (fx.awayTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.awayTeam)
-                                else app.prefsRepo.togglePinTeam(fx.homeTeam)
-                            },
+                            onTogglePin = onTogglePin,
                             onClick = { onOpenMatch(fx.id) },
                         )
                     } else {
+                        val hProf = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]
+                        val aProf = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.awayTeam)]
                         FixtureCard(
                             fixture = fx,
-                            homePower = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]?.powerScore ?: 50,
-                            awayPower = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.awayTeam)]?.powerScore ?: 50,
-                            homeForm = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.homeTeam)]?.recentForm.orEmpty(),
-                            awayForm = snapshot.profiles[PredictionEngine.profileKey(fx.sport, fx.awayTeam)]?.recentForm.orEmpty(),
+                            homePower = hProf?.powerScore ?: 50,
+                            awayPower = aProf?.powerScore ?: 50,
+                            homeForm = hProf?.recentForm.orEmpty(),
+                            awayForm = aProf?.recentForm.orEmpty(),
                             isPinned = isPinned,
-                            onTogglePin = {
-                                if (fx.homeTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.homeTeam)
-                                else if (fx.awayTeam in prefs.pinnedTeams) app.prefsRepo.togglePinTeam(fx.awayTeam)
-                                else app.prefsRepo.togglePinTeam(fx.homeTeam)
-                            },
+                            onTogglePin = onTogglePin,
                             onClick = { onOpenMatch(fx.id) },
                         )
                     }
@@ -283,11 +309,12 @@ private fun CompactFixtureRow(
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text("$hPct% – $aPct%", style = tabularStyle(13.5f, FontWeight.ExtraBold, c.win))
-                IconButton(onClick = onTogglePin, modifier = Modifier.size(28.dp)) {
+                IconButton(onClick = onTogglePin, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = if (isPinned) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                        contentDescription = "Pin favorite",
+                        contentDescription = if (isPinned) "Unpin favorite" else "Pin favorite",
                         tint = if (isPinned) c.draw else c.textMuted,
+                        modifier = Modifier.size(20.dp),
                     )
                 }
             }
@@ -317,7 +344,7 @@ private fun FixtureCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "${fixture.leagueName}${if (fixture.surface != null) " · ${fixture.surface}" else ""}",
+                text = "${fixture.leagueName}${if (!fixture.surface.isNullOrBlank()) " · ${fixture.surface}" else ""}",
                 color = c.accent,
                 fontSize = scaledSp(12f),
                 fontWeight = FontWeight.ExtraBold,
@@ -325,19 +352,19 @@ private fun FixtureCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     text = formatLocalKickoff(fixture.kickoffIso),
                     color = c.textMuted,
                     fontSize = scaledSp(11f),
                     fontWeight = FontWeight.Medium,
                 )
-                IconButton(onClick = onTogglePin, modifier = Modifier.size(26.dp)) {
+                IconButton(onClick = onTogglePin, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = if (isPinned) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                        contentDescription = "Pin favorite team",
+                        contentDescription = if (isPinned) "Unpin favorite team" else "Pin favorite team",
                         tint = if (isPinned) c.draw else c.textMuted,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(20.dp),
                     )
                 }
             }
@@ -415,7 +442,7 @@ private fun FixtureCard(
         if (fixture.bestValueLabel != null && fixture.bestValueEdgePct != null) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 StatusBadge(
-                    text = "Good Value: ${fixture.bestValueLabel} (+${String.format("%.1f", fixture.bestValueEdgePct)}% edge)",
+                    text = "Good Value: ${fixture.bestValueLabel} (+${String.format(Locale.US, "%.1f", fixture.bestValueEdgePct)}% edge)",
                     color = c.valueHighlight,
                     containerColor = c.valueHighlightDim,
                 )

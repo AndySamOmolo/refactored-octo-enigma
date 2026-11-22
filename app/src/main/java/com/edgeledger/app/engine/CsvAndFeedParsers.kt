@@ -8,12 +8,13 @@ import com.edgeledger.app.model.TeamProfile
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import java.time.LocalDate
+import java.util.Locale
 import kotlin.math.max
 
 data class RawUpcomingEvent(
@@ -35,23 +36,52 @@ data class RawUpcomingEvent(
 )
 
 object CsvAndFeedParsers {
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val whitespaceRegex = Regex("\\s+")
+    private val footballSuffixRegex = Regex("(?i)\\s+(fc|afc|cf|sc)$")
+    private val footballPrefixRegex = Regex("(?i)^(fc|afc|cf|sc)\\s+")
 
     private val FOOTBALL_ALIASES = mapOf(
         "man city" to "Manchester City",
+        "manchester city" to "Manchester City",
         "man united" to "Manchester United",
         "man utd" to "Manchester United",
+        "manchester utd" to "Manchester United",
         "nott'm forest" to "Nottingham Forest",
-        "wolves" to "Wolverhampton",
-        "spurs" to "Tottenham",
-        "tottenham hotspur" to "Tottenham",
+        "nottingham forest" to "Nottingham Forest",
+        "wolves" to "Wolverhampton Wanderers",
+        "wolverhampton" to "Wolverhampton Wanderers",
+        "wolverhampton wanderers" to "Wolverhampton Wanderers",
+        "spurs" to "Tottenham Hotspur",
+        "tottenham" to "Tottenham Hotspur",
+        "tottenham hotspur" to "Tottenham Hotspur",
         "newcastle" to "Newcastle United",
+        "newcastle utd" to "Newcastle United",
         "west ham" to "West Ham United",
+        "brighton" to "Brighton & Hove Albion",
+        "brighton & hove albion" to "Brighton & Hove Albion",
+        "brighton and hove albion" to "Brighton & Hove Albion",
+        "leicester" to "Leicester City",
+        "ipswich" to "Ipswich Town",
         "ath madrid" to "Atletico Madrid",
+        "atletico de madrid" to "Atletico Madrid",
+        "atlético madrid" to "Atletico Madrid",
+        "ath bilbao" to "Athletic Club",
+        "athletic bilbao" to "Athletic Club",
+        "betis" to "Real Betis",
+        "sociedad" to "Real Sociedad",
+        "celta" to "Celta Vigo",
+        "vallecano" to "Rayo Vallecano",
+        "espanol" to "Espanyol",
         "bayern munich" to "Bayern Munich",
         "bayern münchen" to "Bayern Munich",
         "dortmund" to "Borussia Dortmund",
+        "m'gladbach" to "Borussia Monchengladbach",
+        "monchengladbach" to "Borussia Monchengladbach",
         "leverkusen" to "Bayer Leverkusen",
+        "ein frankfurt" to "Eintracht Frankfurt",
+        "rb leipzig" to "RB Leipzig",
+        "stuttgart" to "VfB Stuttgart",
         "inter" to "Inter Milan",
         "internazionale" to "Inter Milan",
         "milan" to "AC Milan",
@@ -59,7 +89,6 @@ object CsvAndFeedParsers {
         "psg" to "Paris Saint-Germain",
     )
 
-    // Complete 32-team NFL map covering nflverse codes, ESPN codes, and legacy franchise codes
     val NFL_ABBREV_TO_FULL: Map<String, String> = mapOf(
         "ARI" to "Arizona Cardinals",
         "ATL" to "Atlanta Falcons",
@@ -98,9 +127,9 @@ object CsvAndFeedParsers {
         "NYJ" to "New York Jets",
         "PHI" to "Philadelphia Eagles",
         "PIT" to "Pittsburgh Steelers",
-        "SEA" to "Seattle Seahawks",
         "SF" to "San Francisco 49ers",
         "SFO" to "San Francisco 49ers",
+        "SEA" to "Seattle Seahawks",
         "TB" to "Tampa Bay Buccaneers",
         "TAM" to "Tampa Bay Buccaneers",
         "TEN" to "Tennessee Titans",
@@ -108,16 +137,15 @@ object CsvAndFeedParsers {
         "WSH" to "Washington Commanders",
     )
 
-    // Complete 32-team NHL official 3-letter abbreviation map (including Utah Mammoth UTA)
     val NHL_ABBREV_TO_FULL: Map<String, String> = mapOf(
         "ANA" to "Anaheim Ducks",
         "BOS" to "Boston Bruins",
         "BUF" to "Buffalo Sabres",
-        "CGY" to "Calgary Flames",
         "CAR" to "Carolina Hurricanes",
+        "CBJ" to "Columbus Blue Jackets",
+        "CGY" to "Calgary Flames",
         "CHI" to "Chicago Blackhawks",
         "COL" to "Colorado Avalanche",
-        "CBJ" to "Columbus Blue Jackets",
         "DAL" to "Dallas Stars",
         "DET" to "Detroit Red Wings",
         "EDM" to "Edmonton Oilers",
@@ -125,620 +153,692 @@ object CsvAndFeedParsers {
         "LAK" to "Los Angeles Kings",
         "MIN" to "Minnesota Wild",
         "MTL" to "Montreal Canadiens",
-        "NSH" to "Nashville Predators",
         "NJD" to "New Jersey Devils",
+        "NSH" to "Nashville Predators",
         "NYI" to "New York Islanders",
         "NYR" to "New York Rangers",
         "OTT" to "Ottawa Senators",
         "PHI" to "Philadelphia Flyers",
         "PIT" to "Pittsburgh Penguins",
-        "SJS" to "San Jose Sharks",
         "SEA" to "Seattle Kraken",
+        "SJS" to "San Jose Sharks",
         "STL" to "St. Louis Blues",
         "TBL" to "Tampa Bay Lightning",
         "TOR" to "Toronto Maple Leafs",
-        "UTA" to "Utah Mammoth",
+        "UTA" to "Utah Hockey Club",
         "VAN" to "Vancouver Canucks",
         "VGK" to "Vegas Golden Knights",
-        "WSH" to "Washington Capitals",
         "WPG" to "Winnipeg Jets",
+        "WSH" to "Washington Capitals",
     )
 
-    val NHL_CITY_TO_FULL: Map<String, String> = mapOf(
-        "anaheim" to "Anaheim Ducks",
-        "boston" to "Boston Bruins",
-        "buffalo" to "Buffalo Sabres",
-        "calgary" to "Calgary Flames",
-        "carolina" to "Carolina Hurricanes",
-        "chicago" to "Chicago Blackhawks",
-        "colorado" to "Colorado Avalanche",
-        "columbus" to "Columbus Blue Jackets",
-        "dallas" to "Dallas Stars",
-        "detroit" to "Detroit Red Wings",
-        "edmonton" to "Edmonton Oilers",
-        "florida" to "Florida Panthers",
-        "los angeles" to "Los Angeles Kings",
-        "minnesota" to "Minnesota Wild",
-        "montreal" to "Montreal Canadiens",
-        "montréal" to "Montreal Canadiens",
+    private val NBA_ALIASES = mapOf(
+        "la clippers" to "Los Angeles Clippers",
+        "la lakers" to "Los Angeles Lakers",
+    )
+
+    private val NHL_ALIASES = mapOf(
+        "st louis blues" to "St. Louis Blues",
+        "montreal canadiens" to "Montreal Canadiens",
         "montréal canadiens" to "Montreal Canadiens",
-        "nashville" to "Nashville Predators",
-        "new jersey" to "New Jersey Devils",
-        "ny islanders" to "New York Islanders",
-        "ny rangers" to "New York Rangers",
-        "ottawa" to "Ottawa Senators",
-        "philadelphia" to "Philadelphia Flyers",
-        "pittsburgh" to "Pittsburgh Penguins",
-        "san jose" to "San Jose Sharks",
-        "seattle" to "Seattle Kraken",
-        "st. louis" to "St. Louis Blues",
-        "st louis" to "St. Louis Blues",
-        "tampa bay" to "Tampa Bay Lightning",
-        "toronto" to "Toronto Maple Leafs",
-        "utah" to "Utah Mammoth",
-        "utah hockey club" to "Utah Mammoth",
-        "vancouver" to "Vancouver Canucks",
-        "vegas" to "Vegas Golden Knights",
-        "washington" to "Washington Capitals",
-        "winnipeg" to "Winnipeg Jets",
+        "utah hockey club" to "Utah Hockey Club",
+        "utah mammoth" to "Utah Hockey Club",
     )
 
-    fun canonicalTeam(raw: String, sport: Sport? = null): String {
-        val clean = raw.trim().replace(Regex("\\s+"), " ")
-        if (clean.isEmpty()) return ""
-        val lower = clean.lowercase()
-        val upper = clean.uppercase()
+    fun canonicalTeam(rawName: String, sport: Sport): String = normalizeTeam(rawName, sport)
+
+    fun normalizeTeam(rawName: String, sport: Sport): String {
+        val cleaned = rawName.trim().replace(whitespaceRegex, " ")
+        if (cleaned.isBlank()) return ""
         return when (sport) {
-            Sport.NFL -> NFL_ABBREV_TO_FULL[upper] ?: clean
-            Sport.NHL -> NHL_ABBREV_TO_FULL[upper] ?: NHL_CITY_TO_FULL[lower] ?: clean
-            Sport.FOOTBALL -> FOOTBALL_ALIASES[lower] ?: clean
-            null -> FOOTBALL_ALIASES[lower] ?: clean
-            else -> clean
+            Sport.NFL -> {
+                val upper = cleaned.uppercase(Locale.ROOT)
+                NFL_ABBREV_TO_FULL[upper] ?: cleaned
+            }
+            Sport.NHL -> {
+                val upper = cleaned.uppercase(Locale.ROOT)
+                NHL_ABBREV_TO_FULL[upper] ?: NHL_ALIASES[cleaned.lowercase(Locale.ROOT)] ?: cleaned
+            }
+            Sport.FOOTBALL -> {
+                val lower = cleaned.lowercase(Locale.ROOT)
+                FOOTBALL_ALIASES[lower]?.let { return it }
+                val stripped = cleaned
+                    .replace(footballSuffixRegex, "")
+                    .replace(footballPrefixRegex, "")
+                    .trim()
+                FOOTBALL_ALIASES[stripped.lowercase(Locale.ROOT)] ?: stripped.ifBlank { cleaned }
+            }
+            Sport.NBA -> NBA_ALIASES[cleaned.lowercase(Locale.ROOT)] ?: cleaned
+            else -> cleaned
         }
     }
 
-    fun parseCsv(text: String): List<Map<String, String>> {
-        val cleaned = text.removePrefix("\uFEFF")
-        val rows = mutableListOf<List<String>>()
-        val current = mutableListOf<String>()
-        val field = StringBuilder()
+    fun parseCsvLine(line: String): List<String> {
+        val cleanLine = line.trimEnd('\r')
+        val out = mutableListOf<String>()
+        val cur = StringBuilder()
         var inQuotes = false
+        var atFieldStart = true
         var i = 0
-        while (i < cleaned.length) {
-            val ch = cleaned[i]
+        while (i < cleanLine.length) {
+            val ch = cleanLine[i]
             when {
                 inQuotes -> {
                     if (ch == '"') {
-                        if (i + 1 < cleaned.length && cleaned[i + 1] == '"') {
-                            field.append('"')
+                        if (i + 1 < cleanLine.length && cleanLine[i + 1] == '"') {
+                            cur.append('"')
                             i++
                         } else {
                             inQuotes = false
                         }
-                    } else field.append(ch)
+                    } else {
+                        cur.append(ch)
+                    }
                 }
-                ch == '"' -> inQuotes = true
+                ch == '"' && atFieldStart -> {
+                    inQuotes = true
+                    atFieldStart = false
+                }
                 ch == ',' -> {
-                    current.add(field.toString().trim())
-                    field.clear()
+                    out.add(cur.toString().trim())
+                    cur.setLength(0)
+                    atFieldStart = true
                 }
-                ch == '\n' -> {
-                    current.add(field.toString().trim())
-                    field.clear()
-                    if (current.any { it.isNotEmpty() }) rows.add(current.toList())
-                    current.clear()
+                else -> {
+                    cur.append(ch)
+                    if (!ch.isWhitespace()) atFieldStart = false
                 }
-                ch != '\r' -> field.append(ch)
             }
             i++
         }
-        if (field.isNotEmpty() || current.isNotEmpty()) {
-            current.add(field.toString().trim())
-            if (current.any { it.isNotEmpty() }) rows.add(current.toList())
-        }
-        if (rows.size < 2) return emptyList()
-        val headers = rows.first()
-        return rows.drop(1).map { vals ->
-            buildMap {
-                headers.forEachIndexed { idx, h -> put(h, vals.getOrNull(idx) ?: "") }
-            }
-        }
+        out.add(cur.toString().trim())
+        return out
     }
 
-    private fun parseDate(raw: String): String? {
-        val s = raw.trim()
-        if (Regex("^\\d{4}-\\d{2}-\\d{2}").containsMatchIn(s)) return s.take(10)
-        val parts = s.split("/")
+    private fun validDecimalOdds(raw: String?): Double? {
+        val d = raw?.trim()?.toDoubleOrNull() ?: return null
+        return if (d.isFinite() && d > 1.0 && d < 1000.0) d else null
+    }
+
+    private fun parseFootballDateIso(rawDate: String): String? {
+        val parts = rawDate.trim().split("/")
         if (parts.size != 3) return null
-        val dd = parts[0].padStart(2, '0')
-        val mm = parts[1].padStart(2, '0')
-        val yyyy = if (parts[2].length == 2) "20${parts[2]}" else parts[2]
-        return "$yyyy-$mm-$dd"
+        val d = parts[0].toIntOrNull() ?: return null
+        val m = parts[1].toIntOrNull() ?: return null
+        val rawY = parts[2].toIntOrNull() ?: return null
+        val y = if (rawY < 100) 2000 + rawY else rawY
+        return runCatching { LocalDate.of(y, m, d).toString() }.getOrNull()
     }
 
-    private fun dOpt(v: String?): Double? = v?.toDoubleOrNull()?.takeIf { it.isFinite() && it > 1.01 }
-    private fun iOpt(v: String?): Int? = v?.toIntOrNull()
-
-    fun parseFootballDataCsv(csv: String, leagueId: String): List<HistoricalMatch> =
-        parseCsv(csv).mapNotNull { r ->
-            val date = parseDate(r["Date"] ?: "") ?: return@mapNotNull null
-            val home = canonicalTeam(r["HomeTeam"] ?: r["Home"] ?: "", Sport.FOOTBALL)
-            val away = canonicalTeam(r["AwayTeam"] ?: r["Away"] ?: "", Sport.FOOTBALL)
-            val hg = iOpt(r["FTHG"] ?: r["HG"]) ?: return@mapNotNull null
-            val ag = iOpt(r["FTAG"] ?: r["AG"]) ?: return@mapNotNull null
-            if (home.isBlank() || away.isBlank()) return@mapNotNull null
-
-            HistoricalMatch(
-                id = "fd-$leagueId-$date-$home-$away",
-                sport = Sport.FOOTBALL,
-                leagueId = leagueId,
-                dateIso = date,
-                homeTeam = home,
-                awayTeam = away,
-                homeScore = hg,
-                awayScore = ag,
-                oddsHome = dOpt(r["AvgH"]) ?: dOpt(r["B365H"]) ?: dOpt(r["PSH"]),
-                oddsDraw = dOpt(r["AvgD"]) ?: dOpt(r["B365D"]) ?: dOpt(r["PSD"]),
-                oddsAway = dOpt(r["AvgA"]) ?: dOpt(r["B365A"]) ?: dOpt(r["PSA"]),
-                homeHtGoals = iOpt(r["HTHG"]),
-                awayHtGoals = iOpt(r["HTAG"]),
-                homeShots = iOpt(r["HS"]),
-                awayShots = iOpt(r["AS"]),
-                homeSot = iOpt(r["HST"]),
-                awaySot = iOpt(r["AST"]),
-                homeCorners = iOpt(r["HC"]),
-                awayCorners = iOpt(r["AC"]),
-                homeFouls = iOpt(r["HF"]),
-                awayFouls = iOpt(r["AF"]),
-                homeYellows = iOpt(r["HY"]),
-                awayYellows = iOpt(r["AY"]),
-                homeReds = iOpt(r["HR"]),
-                awayReds = iOpt(r["AR"]),
-            )
-        }
-
-    fun parseClubEloCsv(csv: String): Map<String, Double> = buildMap {
-        for (r in parseCsv(csv)) {
-            val club = canonicalTeam(r["Club"] ?: "", Sport.FOOTBALL)
-            val elo = r["Elo"]?.toDoubleOrNull()
-            if (club.isNotBlank() && elo != null) put(club, elo)
-        }
+    private fun parseIsoDateSafe(raw: String): String? {
+        val s = raw.trim().take(10)
+        if (s.length != 10) return null
+        return runCatching { LocalDate.parse(s).toString() }.getOrNull()
     }
 
-    fun parseNflverseGamesCsv(csv: String, minSeason: Int = 2024): List<HistoricalMatch> =
-        parseCsv(csv).mapNotNull { r ->
-            val season = iOpt(r["season"]) ?: return@mapNotNull null
-            if (season < minSeason) return@mapNotNull null
-            val date = (r["gameday"] ?: "").take(10)
-            val home = canonicalTeam(r["home_team"] ?: "", Sport.NFL)
-            val away = canonicalTeam(r["away_team"] ?: "", Sport.NFL)
-            val hs = iOpt(r["home_score"]) ?: return@mapNotNull null
-            val ascore = iOpt(r["away_score"]) ?: return@mapNotNull null
-            if (date.isBlank() || home.isBlank() || away.isBlank()) return@mapNotNull null
+    fun parseFootballDataCsv(raw: String, leagueId: String): List<HistoricalMatch> {
+        val lines = raw.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.size < 2) return emptyList()
+        val headers = parseCsvLine(lines.first().removePrefix("\uFEFF"))
+        val idx = headers.withIndex().associate { (i, h) -> h.trim() to i }
+        fun col(cols: List<String>, name: String): String =
+            idx[name]?.let { cols.getOrNull(it) }.orEmpty().trim()
 
-            HistoricalMatch(
-                id = r["game_id"] ?: "nfl-$date-$home-$away",
-                sport = Sport.NFL,
-                leagueId = "NFL",
-                dateIso = date,
-                homeTeam = home,
-                awayTeam = away,
-                homeScore = hs,
-                awayScore = ascore,
-                oddsHome = r["home_moneyline"]?.toDoubleOrNull()?.let { OddsMath.americanToDecimal(it) },
-                oddsAway = r["away_moneyline"]?.toDoubleOrNull()?.let { OddsMath.americanToDecimal(it) },
-                spreadLine = r["spread_line"]?.toDoubleOrNull(),
-                totalLine = r["total_line"]?.toDoubleOrNull(),
-                homeRestDays = iOpt(r["home_rest"]),
-                awayRestDays = iOpt(r["away_rest"]),
+        val out = mutableListOf<HistoricalMatch>()
+        for (rowIdx in 1 until lines.size) {
+            val cols = parseCsvLine(lines[rowIdx])
+            val dateIso = parseFootballDateIso(col(cols, "Date")) ?: continue
+            val home = normalizeTeam(col(cols, "HomeTeam"), Sport.FOOTBALL)
+            val away = normalizeTeam(col(cols, "AwayTeam"), Sport.FOOTBALL)
+            if (home.isBlank() || away.isBlank() || home == away) continue
+
+            val fthg = col(cols, "FTHG").toIntOrNull() ?: continue
+            val ftag = col(cols, "FTAG").toIntOrNull() ?: continue
+            if (fthg < 0 || ftag < 0) continue
+
+            val oh = validDecimalOdds(col(cols, "PSH").ifBlank { col(cols, "B365H") })
+            val od = validDecimalOdds(col(cols, "PSD").ifBlank { col(cols, "B365D") })
+            val oa = validDecimalOdds(col(cols, "PSA").ifBlank { col(cols, "B365A") })
+
+            out.add(
+                HistoricalMatch(
+                    id = "fd_${leagueId}_${dateIso}_${rowIdx}",
+                    sport = Sport.FOOTBALL,
+                    leagueId = leagueId,
+                    dateIso = dateIso,
+                    homeTeam = home,
+                    awayTeam = away,
+                    homeScore = fthg,
+                    awayScore = ftag,
+                    oddsHome = oh,
+                    oddsDraw = od,
+                    oddsAway = oa,
+                    homeHtGoals = col(cols, "HTHG").toIntOrNull()?.takeIf { it >= 0 },
+                    awayHtGoals = col(cols, "HTAG").toIntOrNull()?.takeIf { it >= 0 },
+                    homeShots = col(cols, "HS").toIntOrNull()?.takeIf { it >= 0 },
+                    awayShots = col(cols, "AS").toIntOrNull()?.takeIf { it >= 0 },
+                    homeSot = col(cols, "HST").toIntOrNull()?.takeIf { it >= 0 },
+                    awaySot = col(cols, "AST").toIntOrNull()?.takeIf { it >= 0 },
+                    homeCorners = col(cols, "HC").toIntOrNull()?.takeIf { it >= 0 },
+                    awayCorners = col(cols, "AC").toIntOrNull()?.takeIf { it >= 0 },
+                    homeFouls = col(cols, "HF").toIntOrNull()?.takeIf { it >= 0 },
+                    awayFouls = col(cols, "AF").toIntOrNull()?.takeIf { it >= 0 },
+                    homeYellows = col(cols, "HY").toIntOrNull()?.takeIf { it >= 0 },
+                    awayYellows = col(cols, "AY").toIntOrNull()?.takeIf { it >= 0 },
+                    homeReds = col(cols, "HR").toIntOrNull()?.takeIf { it >= 0 },
+                    awayReds = col(cols, "AR").toIntOrNull()?.takeIf { it >= 0 },
+                )
             )
         }
+        return out
+    }
 
-    fun parseTmlTennisCsv(csv: String): List<HistoricalMatch> =
-        parseCsv(csv).mapIndexedNotNull { idx, r ->
-            val w = canonicalTeam(r["winner_name"] ?: "", Sport.TENNIS)
-            val l = canonicalTeam(r["loser_name"] ?: "", Sport.TENNIS)
-            val rawD = (r["tourney_date"] ?: "").trim()
-            if (w.isBlank() || l.isBlank() || rawD.length < 8) return@mapIndexedNotNull null
-            val date = "${rawD.substring(0, 4)}-${rawD.substring(4, 6)}-${rawD.substring(6, 8)}"
-            val surfRaw = (r["surface"] ?: "Hard").lowercase()
-            val surf = when {
-                "clay" in surfRaw -> "Clay"
-                "grass" in surfRaw -> "Grass"
-                else -> "Hard"
-            }
-            val wIn = r["w_1stIn"]?.toDoubleOrNull()
-            val wWon = r["w_1stWon"]?.toDoubleOrNull()
-            val lIn = r["l_1stIn"]?.toDoubleOrNull()
-            val lWon = r["l_1stWon"]?.toDoubleOrNull()
+    fun parseClubEloCsv(raw: String): Map<String, Double> {
+        val lines = raw.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.size < 2) return emptyMap()
+        val headers = parseCsvLine(lines.first().removePrefix("\uFEFF"))
+        val clubIdx = headers.indexOfFirst { it.equals("Club", ignoreCase = true) }
+        val eloIdx = headers.indexOfFirst { it.equals("Elo", ignoreCase = true) }
+        if (clubIdx < 0 || eloIdx < 0) return emptyMap()
 
-            HistoricalMatch(
-                id = "atp-$date-$idx-$w-$l",
-                sport = Sport.TENNIS,
-                leagueId = "ATP",
-                dateIso = date,
-                homeTeam = w,
-                awayTeam = l,
-                homeScore = 2,
-                awayScore = 0,
-                surface = surf,
-                homeAces = iOpt(r["w_ace"]),
-                awayAces = iOpt(r["l_ace"]),
-                homeDoubleFaults = iOpt(r["w_df"]),
-                awayDoubleFaults = iOpt(r["l_df"]),
-                homeFirstServeWonPct = if (wIn != null && wIn > 0 && wWon != null) (wWon / wIn) * 100.0 else null,
-                awayFirstServeWonPct = if (lIn != null && lIn > 0 && lWon != null) (lWon / lIn) * 100.0 else null,
+        val map = LinkedHashMap<String, Double>()
+        for (i in 1 until lines.size) {
+            val cols = parseCsvLine(lines[i])
+            val club = cols.getOrNull(clubIdx)?.trim().orEmpty()
+            val elo = cols.getOrNull(eloIdx)?.trim()?.toDoubleOrNull() ?: continue
+            if (club.isBlank() || !elo.isFinite() || elo !in 800.0..2600.0) continue
+            map[normalizeTeam(club, Sport.FOOTBALL)] = elo
+        }
+        return map
+    }
+
+    fun parseNflverseGamesCsv(raw: String, minSeason: Int): List<HistoricalMatch> {
+        val lines = raw.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.size < 2) return emptyList()
+        val headers = parseCsvLine(lines.first().removePrefix("\uFEFF"))
+        val idx = headers.withIndex().associate { (i, h) -> h.trim() to i }
+        fun col(cols: List<String>, name: String): String =
+            idx[name]?.let { cols.getOrNull(it) }.orEmpty().trim()
+
+        val out = mutableListOf<HistoricalMatch>()
+        for (i in 1 until lines.size) {
+            val cols = parseCsvLine(lines[i])
+            val season = col(cols, "season").toIntOrNull() ?: continue
+            if (season < minSeason) continue
+            val dateIso = parseIsoDateSafe(col(cols, "gameday")) ?: continue
+            val hScore = col(cols, "home_score").toIntOrNull() ?: continue
+            val aScore = col(cols, "away_score").toIntOrNull() ?: continue
+            if (hScore < 0 || aScore < 0) continue
+
+            val home = normalizeTeam(col(cols, "home_team"), Sport.NFL)
+            val away = normalizeTeam(col(cols, "away_team"), Sport.NFL)
+            if (home.isBlank() || away.isBlank() || home == away) continue
+
+            val homeMl = col(cols, "home_moneyline").toDoubleOrNull()?.takeIf { it.isFinite() }
+            val awayMl = col(cols, "away_moneyline").toDoubleOrNull()?.takeIf { it.isFinite() }
+            val oh = homeMl?.let { OddsMath.americanToDecimalOrNull(it) }
+            val oa = awayMl?.let { OddsMath.americanToDecimalOrNull(it) }
+
+            out.add(
+                HistoricalMatch(
+                    id = col(cols, "game_id").ifBlank { "nfl_${dateIso}_$i" },
+                    sport = Sport.NFL,
+                    leagueId = "NFL",
+                    dateIso = dateIso,
+                    homeTeam = home,
+                    awayTeam = away,
+                    homeScore = hScore,
+                    awayScore = aScore,
+                    oddsHome = oh,
+                    oddsAway = oa,
+                    spreadLine = col(cols, "spread_line").toDoubleOrNull()?.takeIf { it.isFinite() },
+                    totalLine = col(cols, "total_line").toDoubleOrNull()?.takeIf { it.isFinite() },
+                    homeRestDays = col(cols, "home_rest").toIntOrNull()?.takeIf { it in 0..30 },
+                    awayRestDays = col(cols, "away_rest").toIntOrNull()?.takeIf { it in 0..30 },
+                )
             )
         }
+        return out
+    }
+
+    fun parseTmlTennisCsv(raw: String): List<HistoricalMatch> {
+        val lines = raw.lineSequence().filter { it.isNotBlank() }.toList()
+        if (lines.size < 2) return emptyList()
+        val headers = parseCsvLine(lines.first().removePrefix("\uFEFF"))
+        val idx = headers.withIndex().associate { (i, h) -> h.trim() to i }
+        fun col(cols: List<String>, name: String): String =
+            idx[name]?.let { cols.getOrNull(it) }.orEmpty().trim()
+
+        val out = mutableListOf<HistoricalMatch>()
+        for (i in 1 until lines.size) {
+            val cols = parseCsvLine(lines[i])
+            val rawDate = col(cols, "tourney_date")
+            if (rawDate.length != 8) continue
+            val y = rawDate.substring(0, 4).toIntOrNull() ?: continue
+            val m = rawDate.substring(4, 6).toIntOrNull() ?: continue
+            val d = rawDate.substring(6, 8).toIntOrNull() ?: continue
+            val dateIso = runCatching { LocalDate.of(y, m, d).toString() }.getOrNull() ?: continue
+
+            val winner = col(cols, "winner_name")
+            val loser = col(cols, "loser_name")
+            if (winner.isBlank() || loser.isBlank() || winner == loser) continue
+
+            val w1stIn = col(cols, "w_1stIn").toDoubleOrNull()?.takeIf { it.isFinite() && it > 0.0 }
+            val w1stWon = col(cols, "w_1stWon").toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+            val l1stIn = col(cols, "l_1stIn").toDoubleOrNull()?.takeIf { it.isFinite() && it > 0.0 }
+            val l1stWon = col(cols, "l_1stWon").toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 }
+
+            val wPct = if (w1stIn != null && w1stWon != null) (w1stWon / w1stIn * 100.0).coerceIn(0.0, 100.0) else null
+            val lPct = if (l1stIn != null && l1stWon != null) (l1stWon / l1stIn * 100.0).coerceIn(0.0, 100.0) else null
+
+            out.add(
+                HistoricalMatch(
+                    id = "atp_${dateIso}_$i",
+                    sport = Sport.TENNIS,
+                    leagueId = "ATP",
+                    dateIso = dateIso,
+                    homeTeam = winner,
+                    awayTeam = loser,
+                    homeScore = 1,
+                    awayScore = 0,
+                    surface = col(cols, "surface").ifBlank { "Hard" },
+                    homeAces = col(cols, "w_ace").toIntOrNull()?.takeIf { it >= 0 },
+                    awayAces = col(cols, "l_ace").toIntOrNull()?.takeIf { it >= 0 },
+                    homeDoubleFaults = col(cols, "w_df").toIntOrNull()?.takeIf { it >= 0 },
+                    awayDoubleFaults = col(cols, "l_df").toIntOrNull()?.takeIf { it >= 0 },
+                    homeFirstServeWonPct = wPct,
+                    awayFirstServeWonPct = lPct,
+                )
+            )
+        }
+        return out
+    }
 
     fun parseEspnScoreboard(
-        rawJson: String,
+        raw: String,
         sport: Sport,
         leagueId: String,
         leagueName: String,
     ): Pair<List<HistoricalMatch>, List<RawUpcomingEvent>> {
-        val hist = mutableListOf<HistoricalMatch>()
-        val up = mutableListOf<RawUpcomingEvent>()
-        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return hist to up
-        val events = root["events"] as? JsonArray ?: return hist to up
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+            ?: return emptyList<HistoricalMatch>() to emptyList()
+        val events = root.arr("events") ?: return emptyList<HistoricalMatch>() to emptyList()
 
-        for (el in events) {
-            val ev = el as? JsonObject ?: continue
-            val id = ev["id"]?.jsonPrimitive?.contentOrNull ?: continue
-            val dateIso = ev["date"]?.jsonPrimitive?.contentOrNull ?: ""
-            val comp = (ev["competitions"] as? JsonArray)?.firstOrNull() as? JsonObject ?: continue
-            val comps = comp["competitors"] as? JsonArray ?: continue
-            if (comps.size < 2) continue
+        val completed = mutableListOf<HistoricalMatch>()
+        val upcoming = mutableListOf<RawUpcomingEvent>()
 
-            val homeObj = comps.firstOrNull { (it as? JsonObject)?.get("homeAway")?.jsonPrimitive?.contentOrNull == "home" } as? JsonObject
-                ?: comps[0] as? JsonObject ?: continue
-            val awayObj = comps.firstOrNull { (it as? JsonObject)?.get("homeAway")?.jsonPrimitive?.contentOrNull == "away" } as? JsonObject
-                ?: comps[1] as? JsonObject ?: continue
+        for (evElem in events) {
+            val ev = evElem as? JsonObject ?: continue
+            val id = ev.str("id") ?: continue
+            val kickoff = ev.str("date") ?: continue
+            val comp = ev.arr("competitions")?.firstOrNull() as? JsonObject ?: continue
+            val competitors = comp.arr("competitors")?.mapNotNull { it as? JsonObject } ?: continue
+            if (competitors.size < 2) continue
 
-            fun teamName(c: JsonObject): String {
-                val t = c["team"] as? JsonObject
-                val a = c["athlete"] as? JsonObject
-                val raw = t?.get("displayName")?.jsonPrimitive?.contentOrNull
-                    ?: a?.get("displayName")?.jsonPrimitive?.contentOrNull
-                    ?: t?.get("abbreviation")?.jsonPrimitive?.contentOrNull
-                    ?: ""
-                return canonicalTeam(raw, sport)
-            }
+            val homeObj = competitors.firstOrNull { it.str("homeAway").equals("home", ignoreCase = true) } ?: competitors[0]
+            val awayObj = competitors.firstOrNull { it.str("homeAway").equals("away", ignoreCase = true) }
+                ?: competitors.firstOrNull { it !== homeObj }
+                ?: continue
+            if (homeObj === awayObj) continue
 
-            val hName = teamName(homeObj)
-            val aName = teamName(awayObj)
-            if (hName.isBlank() || aName.isBlank()) continue
+            val homeTeamObj = homeObj.obj("team")
+            val awayTeamObj = awayObj.obj("team")
+            val rawHome = homeTeamObj?.str("displayName") ?: homeTeamObj?.str("shortDisplayName") ?: continue
+            val rawAway = awayTeamObj?.str("displayName") ?: awayTeamObj?.str("shortDisplayName") ?: continue
+            val hName = normalizeTeam(rawHome, sport)
+            val aName = normalizeTeam(rawAway, sport)
+            if (hName.isBlank() || aName.isBlank() || hName == aName) continue
 
-            val completed = (comp["status"] as? JsonObject)
-                ?.get("type")?.jsonObject
-                ?.get("completed")?.jsonPrimitive?.booleanOrNull == true
+            val statusType = comp.obj("status")?.obj("type") ?: ev.obj("status")?.obj("type")
+            val state = statusType?.str("state")?.lowercase(Locale.ROOT).orEmpty()
+            val isCompleted = statusType?.bool("completed") == true || state == "post"
 
-            val hScore = homeObj["score"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-            val aScore = awayObj["score"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
-
-            if (completed && hScore != null && aScore != null) {
-                hist.add(
-                    HistoricalMatch(
-                        id = "espn-$leagueId-$id",
-                        sport = sport,
-                        leagueId = leagueId,
-                        dateIso = dateIso.take(10),
-                        homeTeam = hName,
-                        awayTeam = aName,
-                        homeScore = hScore,
-                        awayScore = aScore,
+            if (isCompleted) {
+                val hScore = homeObj.str("score")?.toIntOrNull()
+                val aScore = awayObj.str("score")?.toIntOrNull()
+                val dateIso = parseIsoDateSafe(kickoff)
+                if (hScore != null && aScore != null && hScore >= 0 && aScore >= 0 && dateIso != null) {
+                    completed.add(
+                        HistoricalMatch(
+                            id = "espn_${leagueId}_$id",
+                            sport = sport,
+                            leagueId = leagueId,
+                            dateIso = dateIso,
+                            homeTeam = hName,
+                            awayTeam = aName,
+                            homeScore = hScore,
+                            awayScore = aScore,
+                        )
                     )
-                )
-            } else {
-                fun logoOf(c: JsonObject): String? {
-                    val t = c["team"] as? JsonObject ?: return null
-                    t["logo"]?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }?.let { return it }
-                    val logos = t["logos"] as? JsonArray ?: return null
-                    return (logos.firstOrNull() as? JsonObject)?.get("href")?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }
                 }
-
-                fun teamIdOf(c: JsonObject): String? =
-                    (c["team"] as? JsonObject)?.get("id")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
-
-                fun leadersOf(c: JsonObject): List<LivePlayerEntry> {
-                    val out = mutableListOf<LivePlayerEntry>()
-                    val leaders = c["leaders"] as? JsonArray ?: return out
-                    for (catEl in leaders) {
-                        val catObj = catEl as? JsonObject ?: continue
-                        val catName = catObj["name"]?.jsonPrimitive?.contentOrNull?.lowercase().orEmpty()
-                        val arr = catObj["leaders"] as? JsonArray ?: continue
-                        val top = arr.firstOrNull() as? JsonObject ?: continue
-                        val athlete = top["athlete"] as? JsonObject ?: continue
-                        val name = athlete["displayName"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                        if (name.isBlank()) continue
-                        val pos = (athlete["position"] as? JsonObject)?.get("abbreviation")?.jsonPrimitive?.contentOrNull?.trim().orEmpty().ifBlank { "STAR" }
-                        val valNum = top["value"]?.jsonPrimitive?.doubleOrNull
-                            ?: top["displayValue"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
-                        out.add(LivePlayerEntry(name = name, position = pos, statCategory = catName, statValue = valNum))
-                    }
-                    return out
-                }
-
-                up.add(
+            } else if (state == "pre") {
+                val oddsLines = parseEspnOdds(comp, sport)
+                upcoming.add(
                     RawUpcomingEvent(
-                        id = "espn-$leagueId-$id",
+                        id = "espn_${leagueId}_$id",
                         sport = sport,
                         leagueId = leagueId,
                         leagueName = leagueName,
-                        kickoffIso = dateIso,
+                        kickoffIso = kickoff,
                         homeTeam = hName,
                         awayTeam = aName,
-                        surface = if (sport == Sport.TENNIS) "Hard" else null,
-                        homeTeamId = teamIdOf(homeObj),
-                        awayTeamId = teamIdOf(awayObj),
-                        homeLeaders = leadersOf(homeObj),
-                        awayLeaders = leadersOf(awayObj),
-                        homeLogoUrl = logoOf(homeObj),
-                        awayLogoUrl = logoOf(awayObj),
+                        bookOdds = oddsLines,
+                        homeTeamId = homeTeamObj?.str("id"),
+                        awayTeamId = awayTeamObj?.str("id"),
+                        homeLeaders = extractEspnLeaders(homeObj),
+                        awayLeaders = extractEspnLeaders(awayObj),
+                        homeLogoUrl = homeTeamObj?.str("logo"),
+                        awayLogoUrl = awayTeamObj?.str("logo"),
                     )
                 )
             }
         }
-        return hist to up
+        return completed to upcoming
     }
 
-    private fun resolveNhlTeamObject(teamObj: JsonObject?): String? {
-        if (teamObj == null) return null
-        val abbrev = teamObj["abbrev"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
-        if (!abbrev.isNullOrBlank()) {
-            NHL_ABBREV_TO_FULL[abbrev]?.let { return it }
-        }
-        val place = (teamObj["placeName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim()
-        val common = (teamObj["commonName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim()
-        if (!place.isNullOrBlank() && !common.isNullOrBlank()) {
-            return canonicalTeam("$place $common", Sport.NHL)
-        }
-        if (!place.isNullOrBlank()) {
-            return canonicalTeam(place, Sport.NHL)
-        }
-        return null
-    }
-
-    fun parseNhlSchedule(rawJson: String): List<RawUpcomingEvent> {
-        val out = mutableListOf<RawUpcomingEvent>()
-        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
-        val weeks = root["gameWeek"] as? JsonArray ?: return out
-        for (day in weeks) {
-            val games = (day as? JsonObject)?.get("games") as? JsonArray ?: continue
-            for (g in games) {
-                val obj = g as? JsonObject ?: continue
-                val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
-                val start = obj["startTimeUTC"]?.jsonPrimitive?.contentOrNull ?: ""
-                val hObj = obj["homeTeam"] as? JsonObject
-                val aObj = obj["awayTeam"] as? JsonObject
-                val h = resolveNhlTeamObject(hObj) ?: continue
-                val a = resolveNhlTeamObject(aObj) ?: continue
-                val hAbbrev = hObj?.get("abbrev")?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
-                val aAbbrev = aObj?.get("abbrev")?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
-                val hLogo = hObj?.get("logo")?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }
-                val aLogo = aObj?.get("logo")?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") }
-                out.add(RawUpcomingEvent("nhl-$id", Sport.NHL, "NHL", "NHL", start, h, a, homeTeamId = hAbbrev, awayTeamId = aAbbrev, homeLogoUrl = hLogo, awayLogoUrl = aLogo))
-            }
-        }
-        return out
-    }
-
-    /**
-     * Parses https://api-web.nhle.com/v1/standings/now into calibrated TeamProfile records
-     * keyed by PredictionEngine.profileKey(Sport.NHL, fullTeamName).
-     */
-    fun parseNhlStandings(rawJson: String): Map<String, TeamProfile> {
-        val out = mutableMapOf<String, TeamProfile>()
-        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
-        val standings = root["standings"] as? JsonArray ?: return out
-
-        for (el in standings) {
-            val s = el as? JsonObject ?: continue
-            val abbrev = (s["teamAbbrev"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim()?.uppercase()
-            val teamNameRaw = (s["teamName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim()
-            val placeRaw = (s["placeName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim()
-            val commonRaw = (s["teamCommonName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim()
-
-            val fullName = abbrev?.let { NHL_ABBREV_TO_FULL[it] }
-                ?: teamNameRaw?.let { canonicalTeam(it, Sport.NHL) }
-                ?: if (!placeRaw.isNullOrBlank() && !commonRaw.isNullOrBlank()) canonicalTeam("$placeRaw $commonRaw", Sport.NHL) else null
-                ?: continue
-
-            val gp = s["gamesPlayed"]?.jsonPrimitive?.intOrNull ?: 0
-            val w = s["wins"]?.jsonPrimitive?.intOrNull ?: 0
-            val l = s["losses"]?.jsonPrimitive?.intOrNull ?: 0
-            val otl = s["otLosses"]?.jsonPrimitive?.intOrNull ?: 0
-            val gf = s["goalFor"]?.jsonPrimitive?.intOrNull ?: 0
-            val ga = s["goalAgainst"]?.jsonPrimitive?.intOrNull ?: 0
-            val ptsPct = s["pointPctg"]?.jsonPrimitive?.doubleOrNull
-                ?: if (gp > 0) (w * 2.0 + otl) / (gp * 2.0) else 0.55
-
-            val homeGp = s["homeGamesPlayed"]?.jsonPrimitive?.intOrNull ?: 0
-            val homeW = s["homeWins"]?.jsonPrimitive?.intOrNull ?: 0
-            val roadGp = s["roadGamesPlayed"]?.jsonPrimitive?.intOrNull ?: 0
-            val roadW = s["roadWins"]?.jsonPrimitive?.intOrNull ?: 0
-
-            val l10W = s["l10Wins"]?.jsonPrimitive?.intOrNull ?: 0
-            val l10L = s["l10Losses"]?.jsonPrimitive?.intOrNull ?: 0
-            val l10Otl = s["l10OtLosses"]?.jsonPrimitive?.intOrNull ?: 0
-
-            val safeGp = max(1, gp).toDouble()
-            val avgScored = if (gp > 0) gf / safeGp else 3.05
-            val avgConceded = if (gp > 0) ga / safeGp else 3.05
-            val gdPerGame = avgScored - avgConceded
-
-            val sampleWeight = gp.toDouble() / (gp + 12.0)
-            val elo = (1500.0 + sampleWeight * ((ptsPct - 0.55) * 420.0 + gdPerGame * 75.0))
-                .coerceIn(1260.0, 1760.0)
-
-            val recent5 = buildList {
-                val total10 = max(1, l10W + l10L + l10Otl)
-                val wSlots = ((l10W.toDouble() / total10) * 5.0).toInt().coerceIn(0, 5)
-                val dSlots = ((l10Otl.toDouble() / total10) * 5.0).toInt().coerceIn(0, 5 - wSlots)
-                val lSlots = (5 - wSlots - dSlots).coerceAtLeast(0)
-                repeat(lSlots) { add("L") }
-                repeat(dSlots) { add("OTL") }
-                repeat(wSlots) { add("W") }
-            }
-
-            out[PredictionEngine.profileKey(Sport.NHL, fullName)] = TeamProfile(
-                team = fullName,
-                sport = Sport.NHL,
-                leagueId = "NHL",
-                elo = elo,
-                clubElo = null,
-                powerScore = PredictionEngine.eloToPowerScore(elo, Sport.NHL, isClubEloAnchored = false),
-                gamesPlayed = gp,
-                wins = w,
-                draws = otl,
-                losses = l,
-                winPct = if (gp > 0) (w / safeGp) * 100.0 else 50.0,
-                homeWinPct = if (homeGp > 0) (homeW.toDouble() / homeGp) * 100.0 else 55.0,
-                awayWinPct = if (roadGp > 0) (roadW.toDouble() / roadGp) * 100.0 else 45.0,
-                avgScored = avgScored,
-                avgConceded = avgConceded,
-                recentForm = recent5,
-                logoUrl = s["teamLogo"]?.jsonPrimitive?.contentOrNull?.takeIf { it.startsWith("http") },
+    private fun parseEspnOdds(comp: JsonObject, sport: Sport): List<BookmakerOddsLine> {
+        val oddsArr = comp.arr("odds") ?: return emptyList()
+        val out = mutableListOf<BookmakerOddsLine>()
+        for (elem in oddsArr) {
+            val obj = elem as? JsonObject ?: continue
+            val provider = obj.obj("provider")?.str("name")?.takeIf { it.isNotBlank() } ?: "ESPN Odds"
+            val homeMl = obj.obj("homeTeamOdds")?.dbl("moneyLine")
+            val awayMl = obj.obj("awayTeamOdds")?.dbl("moneyLine")
+            val drawMl = obj.obj("drawOdds")?.dbl("moneyLine")
+            val oh = homeMl?.let { OddsMath.americanToDecimalOrNull(it) } ?: continue
+            val oa = awayMl?.let { OddsMath.americanToDecimalOrNull(it) } ?: continue
+            val od = drawMl?.let { OddsMath.americanToDecimalOrNull(it) }
+            if (sport.hasDraw && od == null) continue
+            out.add(
+                BookmakerOddsLine(
+                    bookmaker = provider,
+                    isSharp = false,
+                    homeOdds = oh,
+                    drawOdds = od,
+                    awayOdds = oa,
+                    updatedLabel = "ESPN",
+                )
             )
         }
         return out
     }
 
-    fun parseMlbSchedule(rawJson: String): List<RawUpcomingEvent> {
-        val out = mutableListOf<RawUpcomingEvent>()
-        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
-        val dates = root["dates"] as? JsonArray ?: return out
-        for (d in dates) {
-            val games = (d as? JsonObject)?.get("games") as? JsonArray ?: continue
-            for (g in games) {
-                val obj = g as? JsonObject ?: continue
-                val id = obj["gamePk"]?.jsonPrimitive?.contentOrNull ?: continue
-                val date = obj["gameDate"]?.jsonPrimitive?.contentOrNull ?: ""
-                val teams = obj["teams"] as? JsonObject ?: continue
-                val h = ((teams["home"] as? JsonObject)?.get("team") as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull ?: continue
-                val a = ((teams["away"] as? JsonObject)?.get("team") as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull ?: continue
-                out.add(RawUpcomingEvent("mlb-$id", Sport.MLB, "MLB", "MLB", date, canonicalTeam(h, Sport.MLB), canonicalTeam(a, Sport.MLB)))
+    private fun extractEspnLeaders(competitor: JsonObject): List<LivePlayerEntry> {
+        val leadersArr = competitor.arr("leaders") ?: return emptyList()
+        val result = mutableListOf<LivePlayerEntry>()
+        for (catElem in leadersArr) {
+            val catObj = catElem as? JsonObject ?: continue
+            val catName = catObj.str("name") ?: catObj.str("shortDisplayName") ?: ""
+            val inner = catObj.arr("leaders") ?: continue
+            for (lElem in inner) {
+                val lObj = lElem as? JsonObject ?: continue
+                val athlete = lObj.obj("athlete") ?: continue
+                val name = athlete.str("displayName") ?: athlete.str("fullName") ?: continue
+                if (name.isBlank()) continue
+                val pos = athlete.obj("position")?.str("abbreviation").orEmpty()
+                val statVal = lObj.dbl("value")?.takeIf { it.isFinite() }
+                result.add(LivePlayerEntry(name.trim(), pos.trim(), catName.trim(), statVal))
             }
         }
-        return out
+        return result
     }
 
-    /**
-     * Parses live ESPN team roster JSON (works for Soccer, NBA, NFL):
-     * https://site.web.api.espn.com/apis/site/v2/sports/{sport}/{league}/teams/{teamId}/roster
-     */
-    fun parseEspnRoster(rawJson: String): List<LivePlayerEntry> {
-        val out = mutableListOf<LivePlayerEntry>()
-        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
-        val athletes = root["athletes"] as? JsonArray ?: return out
+    fun parseEspnNbaStandings(raw: String): Map<String, TeamProfile> {
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyMap()
+        val children = root.arr("children") ?: return emptyMap()
+        val out = LinkedHashMap<String, TeamProfile>()
 
-        fun addAthlete(a: JsonObject) {
-            val name = a["displayName"]?.jsonPrimitive?.contentOrNull?.trim()
-                ?: a["fullName"]?.jsonPrimitive?.contentOrNull?.trim()
-                ?: return
-            if (name.isBlank()) return
-            val pos = (a["position"] as? JsonObject)?.get("abbreviation")?.jsonPrimitive?.contentOrNull?.trim()
-                ?: (a["position"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull?.trim()
-                ?: ""
-            out.add(LivePlayerEntry(name = name, position = pos.uppercase()))
-        }
+        for (confElem in children) {
+            val conf = confElem as? JsonObject ?: continue
+            val entries = conf.obj("standings")?.arr("entries") ?: continue
+            for (entryElem in entries) {
+                val entry = entryElem as? JsonObject ?: continue
+                val teamObj = entry.obj("team") ?: continue
+                val rawName = teamObj.str("displayName") ?: continue
+                val teamName = normalizeTeam(rawName, Sport.NBA)
+                if (teamName.isBlank()) continue
 
-        for (el in athletes) {
-            val obj = el as? JsonObject ?: continue
-            val items = obj["items"] as? JsonArray
-            if (items != null) {
-                for (item in items) {
-                    (item as? JsonObject)?.let { addAthlete(it) }
-                }
-            } else {
-                addAthlete(obj)
-            }
-        }
-        return out.distinctBy { it.name.lowercase() }
-    }
+                val stats = entry.arr("stats")?.mapNotNull { it as? JsonObject }.orEmpty()
+                fun statVal(name: String): Double? =
+                    stats.firstOrNull { it.str("name").equals(name, ignoreCase = true) }
+                        ?.dbl("value")
+                        ?.takeIf { it.isFinite() }
+                fun statDisplay(name: String): String? =
+                    stats.firstOrNull { it.str("name").equals(name, ignoreCase = true) }
+                        ?.str("displayValue")
 
-    /**
-     * Parses official NHL live team roster JSON:
-     * https://api-web.nhle.com/v1/roster/{abbrev}/current
-     */
-    fun parseNhlRoster(rawJson: String): List<LivePlayerEntry> {
-        val out = mutableListOf<LivePlayerEntry>()
-        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
-        for (groupKey in listOf("forwards", "defensemen")) {
-            val arr = root[groupKey] as? JsonArray ?: continue
-            for (el in arr) {
-                val obj = el as? JsonObject ?: continue
-                val first = (obj["firstName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                val last = (obj["lastName"] as? JsonObject)?.get("default")?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                val full = "$first $last".trim()
-                if (full.isBlank()) continue
-                val pos = obj["positionCode"]?.jsonPrimitive?.contentOrNull?.trim()?.uppercase().orEmpty().ifBlank { if (groupKey == "forwards") "F" else "D" }
-                out.add(LivePlayerEntry(name = full, position = pos))
-            }
-        }
-        return out.distinctBy { it.name.lowercase() }
-    }
+                val wins = (statVal("wins") ?: 0.0).toInt().coerceAtLeast(0)
+                val losses = (statVal("losses") ?: 0.0).toInt().coerceAtLeast(0)
+                val gp = wins + losses
+                val safeGp = max(1, gp)
+                val winPct = (statVal("winPercent")?.let { it * 100.0 } ?: (wins.toDouble() / safeGp * 100.0)).coerceIn(0.0, 100.0)
+                val ppg = statVal("avgPointsFor") ?: 113.0
+                val oppPpg = statVal("avgPointsAgainst") ?: 113.0
+                val elo = (1500.0 + (winPct - 50.0) * 6.0).coerceIn(1150.0, 1850.0)
+                val power = ((elo - 1250.0) / 5.0).toInt().coerceIn(20, 99)
+                val streak = parseStreakCode(statDisplay("streak"))
+                val logo = teamObj.arr("logos")?.firstOrNull()?.let { (it as? JsonObject)?.str("href") }
 
-    /**
-     * Parses live ESPN NBA Standings JSON (keyless):
-     * https://site.web.api.espn.com/apis/v2/sports/basketball/nba/standings
-     * Populates real 2026-27 wins, losses, PPG, OPPG, Elo, Power Score, and Last 5 form for all 30 NBA teams.
-     */
-    fun parseEspnNbaStandings(rawJson: String): Map<String, TeamProfile> {
-        val out = mutableMapOf<String, TeamProfile>()
-        val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return out
-        val children = root["children"] as? JsonArray ?: return out
-
-        for (conf in children) {
-            val standings = (conf as? JsonObject)?.get("standings") as? JsonObject ?: continue
-            val entries = standings["entries"] as? JsonArray ?: continue
-            for (el in entries) {
-                val entry = el as? JsonObject ?: continue
-                val teamObj = entry["team"] as? JsonObject ?: continue
-                val fullName = teamObj["displayName"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                val logoHref = (teamObj["logos"] as? JsonArray)?.firstOrNull()?.let { (it as? JsonObject)?.get("href")?.jsonPrimitive?.contentOrNull }?.takeIf { it.startsWith("http") }
-                if (fullName.isBlank()) continue
-                val statsArr = entry["stats"] as? JsonArray ?: continue
-                val statMap = mutableMapOf<String, Double>()
-                for (stEl in statsArr) {
-                    val stObj = stEl as? JsonObject ?: continue
-                    val name = stObj["name"]?.jsonPrimitive?.contentOrNull ?: continue
-                    val v = stObj["value"]?.jsonPrimitive?.doubleOrNull ?: continue
-                    statMap[name] = v
-                }
-                val w = (statMap["wins"] ?: 0.0).toInt()
-                val l = (statMap["losses"] ?: 0.0).toInt()
-                val gp = max(1, w + l)
-                val winPct = statMap["winPercent"] ?: (w.toDouble() / gp)
-                val ppg = statMap["avgPointsFor"] ?: 113.5
-                val oppg = statMap["avgPointsAgainst"] ?: 113.5
-                val diff = ppg - oppg
-                val sampleWeight = gp.toDouble() / (gp + 10.0)
-                val elo = (1500.0 + sampleWeight * ((winPct - 0.50) * 380.0 + diff * 12.0)).coerceIn(1240.0, 1780.0)
-                val wSlots = (winPct * 5.0).toInt().coerceIn(0, 5)
-                val recent5 = buildList {
-                    repeat(5 - wSlots) { add("L") }
-                    repeat(wSlots) { add("W") }
-                }
-                out[PredictionEngine.profileKey(Sport.NBA, fullName)] = TeamProfile(
-                    team = fullName,
+                out[PredictionEngine.profileKey(Sport.NBA, teamName)] = TeamProfile(
+                    team = teamName,
                     sport = Sport.NBA,
                     leagueId = "NBA",
                     elo = elo,
-                    powerScore = PredictionEngine.eloToPowerScore(elo, Sport.NBA, isClubEloAnchored = false),
+                    powerScore = power,
                     gamesPlayed = gp,
-                    wins = w,
-                    losses = l,
-                    winPct = winPct * 100.0,
-                    homeWinPct = (winPct * 100.0 + 4.0).coerceIn(10.0, 95.0),
-                    awayWinPct = (winPct * 100.0 - 4.0).coerceIn(5.0, 90.0),
+                    wins = wins,
+                    losses = losses,
+                    winPct = winPct,
+                    homeWinPct = (winPct + 4.0).coerceIn(10.0, 95.0),
+                    awayWinPct = (winPct - 4.0).coerceIn(5.0, 90.0),
                     avgScored = ppg,
-                    avgConceded = oppg,
-                    recentForm = recent5,
-                    logoUrl = logoHref,
+                    avgConceded = oppPpg,
+                    recentForm = streak,
+                    logoUrl = logo,
                 )
             }
         }
         return out
     }
+
+    fun parseNhlSchedule(raw: String): List<RawUpcomingEvent> {
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyList()
+        val gameWeek = root.arr("gameWeek") ?: return emptyList()
+        val out = mutableListOf<RawUpcomingEvent>()
+
+        for (dayElem in gameWeek) {
+            val dayObj = dayElem as? JsonObject ?: continue
+            val games = dayObj.arr("games") ?: continue
+            for (gElem in games) {
+                val g = gElem as? JsonObject ?: continue
+                val gameState = g.str("gameState")?.uppercase(Locale.ROOT).orEmpty()
+                if (gameState !in setOf("FUT", "PRE", "SCHEDULED")) continue
+
+                val id = g.str("id") ?: continue
+                val kickoff = g.str("startTimeUTC") ?: continue
+                val homeObj = g.obj("homeTeam") ?: continue
+                val awayObj = g.obj("awayTeam") ?: continue
+                val hPlace = homeObj.obj("placeName")?.str("default").orEmpty()
+                val hCommon = homeObj.obj("commonName")?.str("default").orEmpty()
+                val aPlace = awayObj.obj("placeName")?.str("default").orEmpty()
+                val aCommon = awayObj.obj("commonName")?.str("default").orEmpty()
+                val hRaw = if (hCommon.startsWith(hPlace, ignoreCase = true)) hCommon else "$hPlace $hCommon".trim()
+                val aRaw = if (aCommon.startsWith(aPlace, ignoreCase = true)) aCommon else "$aPlace $aCommon".trim()
+                val hName = normalizeTeam(hRaw, Sport.NHL)
+                val aName = normalizeTeam(aRaw, Sport.NHL)
+                if (hName.isBlank() || aName.isBlank() || hName == aName) continue
+
+                out.add(
+                    RawUpcomingEvent(
+                        id = "nhl_$id",
+                        sport = Sport.NHL,
+                        leagueId = "NHL",
+                        leagueName = "NHL",
+                        kickoffIso = kickoff,
+                        homeTeam = hName,
+                        awayTeam = aName,
+                        homeTeamId = homeObj.str("abbrev"),
+                        awayTeamId = awayObj.str("abbrev"),
+                        homeLogoUrl = homeObj.str("logo"),
+                        awayLogoUrl = awayObj.str("logo"),
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    fun parseNhlStandings(raw: String): Map<String, TeamProfile> {
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyMap()
+        val standings = root.arr("standings") ?: return emptyMap()
+        val out = LinkedHashMap<String, TeamProfile>()
+
+        for (elem in standings) {
+            val st = elem as? JsonObject ?: continue
+            val rawName = st.obj("teamName")?.str("default") ?: continue
+            val teamName = normalizeTeam(rawName, Sport.NHL)
+            if (teamName.isBlank()) continue
+
+            val gp = (st.int("gamesPlayed") ?: 0).coerceAtLeast(0)
+            val safeGp = max(1, gp)
+            val wins = (st.int("wins") ?: 0).coerceAtLeast(0)
+            val losses = ((st.int("losses") ?: 0) + (st.int("otLosses") ?: 0)).coerceAtLeast(0)
+            val gf = (st.dbl("goalFor") ?: 0.0).coerceAtLeast(0.0)
+            val ga = (st.dbl("goalAgainst") ?: 0.0).coerceAtLeast(0.0)
+            val winPct = if (gp > 0) (wins.toDouble() / safeGp * 100.0).coerceIn(0.0, 100.0) else 50.0
+            val elo = (1500.0 + (winPct - 50.0) * 5.0).coerceIn(1200.0, 1800.0)
+            val power = ((elo - 1250.0) / 5.0).toInt().coerceIn(20, 99)
+
+            val streakCode = st.str("streakCode")?.uppercase(Locale.ROOT).orEmpty()
+            val streakCount = (st.int("streakCount") ?: 0).coerceIn(0, 5)
+            val recentForm = if (streakCode in setOf("W", "L") && streakCount > 0) {
+                List(streakCount) { streakCode }
+            } else {
+                emptyList()
+            }
+
+            out[PredictionEngine.profileKey(Sport.NHL, teamName)] = TeamProfile(
+                team = teamName,
+                sport = Sport.NHL,
+                leagueId = "NHL",
+                elo = elo,
+                powerScore = power,
+                gamesPlayed = gp,
+                wins = wins,
+                losses = losses,
+                winPct = winPct,
+                homeWinPct = (winPct + 3.0).coerceIn(10.0, 95.0),
+                awayWinPct = (winPct - 3.0).coerceIn(5.0, 90.0),
+                avgScored = if (gp > 0) gf / safeGp else 3.05,
+                avgConceded = if (gp > 0) ga / safeGp else 3.05,
+                recentForm = recentForm,
+                logoUrl = st.str("teamLogo"),
+            )
+        }
+        return out
+    }
+
+    fun parseMlbSchedule(raw: String): List<RawUpcomingEvent> {
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyList()
+        val dates = root.arr("dates") ?: return emptyList()
+        val out = mutableListOf<RawUpcomingEvent>()
+
+        for (dElem in dates) {
+            val dObj = dElem as? JsonObject ?: continue
+            val games = dObj.arr("games") ?: continue
+            for (gElem in games) {
+                val g = gElem as? JsonObject ?: continue
+                val abstractState = g.obj("status")?.str("abstractGameState").orEmpty()
+                if (!abstractState.equals("Preview", ignoreCase = true)) continue
+
+                val pk = g.str("gamePk") ?: continue
+                val kickoff = g.str("gameDate") ?: continue
+                val teams = g.obj("teams") ?: continue
+                val homeTeamObj = teams.obj("home")?.obj("team") ?: continue
+                val awayTeamObj = teams.obj("away")?.obj("team") ?: continue
+                val hName = normalizeTeam(homeTeamObj.str("name") ?: continue, Sport.MLB)
+                val aName = normalizeTeam(awayTeamObj.str("name") ?: continue, Sport.MLB)
+                if (hName.isBlank() || aName.isBlank() || hName == aName) continue
+
+                val hId = homeTeamObj.str("id")
+                val aId = awayTeamObj.str("id")
+                out.add(
+                    RawUpcomingEvent(
+                        id = "mlb_$pk",
+                        sport = Sport.MLB,
+                        leagueId = "MLB",
+                        leagueName = "MLB",
+                        kickoffIso = kickoff,
+                        homeTeam = hName,
+                        awayTeam = aName,
+                        homeTeamId = hId,
+                        awayTeamId = aId,
+                        homeLogoUrl = hId?.let { "https://www.mlbstatic.com/team-logos/$it.svg" },
+                        awayLogoUrl = aId?.let { "https://www.mlbstatic.com/team-logos/$it.svg" },
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    fun parseEspnRoster(raw: String): List<LivePlayerEntry> {
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyList()
+        val athletes = root.arr("athletes") ?: return emptyList()
+        val out = mutableListOf<LivePlayerEntry>()
+
+        fun extractAthlete(obj: JsonObject) {
+            val name = obj.str("displayName") ?: obj.str("fullName") ?: return
+            if (name.isBlank()) return
+            val pos = obj.obj("position")?.str("abbreviation").orEmpty()
+            out.add(LivePlayerEntry(name = name.trim(), position = pos.trim()))
+        }
+
+        for (elem in athletes) {
+            val obj = elem as? JsonObject ?: continue
+            val items = obj.arr("items")
+            if (items != null) {
+                for (item in items) {
+                    (item as? JsonObject)?.let(::extractAthlete)
+                }
+            } else {
+                extractAthlete(obj)
+            }
+        }
+        return out.distinctBy { it.name.lowercase(Locale.ROOT) }
+    }
+
+    fun parseNhlRoster(raw: String): List<LivePlayerEntry> {
+        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyList()
+        val out = mutableListOf<LivePlayerEntry>()
+        for (groupKey in listOf("forwards", "defensemen")) {
+            val arr = root.arr(groupKey) ?: continue
+            for (elem in arr) {
+                val obj = elem as? JsonObject ?: continue
+                val first = obj.obj("firstName")?.str("default").orEmpty()
+                val last = obj.obj("lastName")?.str("default").orEmpty()
+                val full = "$first $last".trim()
+                if (full.isBlank()) continue
+                val pos = obj.str("positionCode") ?: if (groupKey == "forwards") "F" else "D"
+                out.add(LivePlayerEntry(name = full, position = pos))
+            }
+        }
+        return out.distinctBy { it.name.lowercase(Locale.ROOT) }
+    }
+
+    private fun parseStreakCode(display: String?): List<String> {
+        val s = display?.trim()?.uppercase(Locale.ROOT).orEmpty()
+        if (s.length < 2) return emptyList()
+        val code = s.first()
+        if (code != 'W' && code != 'L') return emptyList()
+        val count = s.drop(1).toIntOrNull()?.coerceIn(1, 5) ?: return emptyList()
+        return List(count) { code.toString() }
+    }
+
+    private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+    private fun JsonObject.dbl(key: String): Double? = (this[key] as? JsonPrimitive)?.doubleOrNull
+    private fun JsonObject.int(key: String): Int? = (this[key] as? JsonPrimitive)?.intOrNull
+    private fun JsonObject.bool(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
+    private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
+    private fun JsonObject.arr(key: String): JsonArray? = this[key] as? JsonArray
 }

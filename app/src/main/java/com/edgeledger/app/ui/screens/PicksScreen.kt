@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -25,9 +26,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.edgeledger.app.EdgeLedgerApp
+import com.edgeledger.app.data.PersonalBetEntity
 import com.edgeledger.app.engine.OddsMath
 import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.ui.components.MetricTile
@@ -36,7 +39,49 @@ import com.edgeledger.app.ui.components.StatusBadge
 import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.scaledSp
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.util.Locale
 import kotlin.math.roundToInt
+
+@Serializable
+private data class ExportedBetDto(
+    val id: String,
+    val date: String,
+    val mode: String,
+    val sport: String,
+    val league: String,
+    val matchup: String,
+    val selection: String,
+    val bookmaker: String,
+    val odds: Double,
+    val closingOdds: Double?,
+    val stake: Double,
+    val status: String,
+    val settledPnl: Double?,
+)
+
+private val exportJsonCodec = Json { prettyPrint = true; encodeDefaults = true }
+
+private fun csvEscapeSafe(raw: String): String {
+    val formulaSafe = if (raw.isNotEmpty() && raw.first() in charArrayOf('=', '+', '-', '@', '\t', '\r')) {
+        "'$raw"
+    } else {
+        raw
+    }
+    return "\"${formulaSafe.replace("\"", "\"\"")}\""
+}
+
+private fun computeSettlementPnl(bet: PersonalBetEntity, status: String): Double? = when (status) {
+    "WON" -> bet.stakeAmount * (bet.decimalOdds - 1.0)
+    "HALF_WIN" -> (bet.stakeAmount * (bet.decimalOdds - 1.0)) * 0.5
+    "LOST" -> -bet.stakeAmount
+    "HALF_LOSS" -> -bet.stakeAmount * 0.5
+    "PUSH", "VOID" -> 0.0
+    "CASH_OUT" -> bet.settledPnl ?: 0.0
+    else -> null
+}
 
 @Composable
 fun PicksScreen(app: EdgeLedgerApp) {
@@ -59,11 +104,11 @@ fun PicksScreen(app: EdgeLedgerApp) {
 
     for (b in bets) {
         when (b.status) {
-            "WON" -> { settled++; won++; netPnl += b.stakeAmount * (b.decimalOdds - 1.0) }
-            "HALF_WIN" -> { settled++; won++; netPnl += (b.stakeAmount * (b.decimalOdds - 1.0)) * 0.5 }
-            "LOST" -> { settled++; netPnl -= b.stakeAmount }
-            "HALF_LOSS" -> { settled++; netPnl -= b.stakeAmount * 0.5 }
-            "CASH_OUT" -> { settled++; netPnl += b.stakeAmount * 0.25 }
+            "WON" -> { settled++; won++; netPnl += b.settledPnl ?: (b.stakeAmount * (b.decimalOdds - 1.0)) }
+            "HALF_WIN" -> { settled++; won++; netPnl += b.settledPnl ?: ((b.stakeAmount * (b.decimalOdds - 1.0)) * 0.5) }
+            "LOST" -> { settled++; netPnl += b.settledPnl ?: (-b.stakeAmount) }
+            "HALF_LOSS" -> { settled++; netPnl += b.settledPnl ?: (-b.stakeAmount * 0.5) }
+            "CASH_OUT" -> { settled++; netPnl += b.settledPnl ?: 0.0 }
         }
         b.closingOdds?.takeIf { it > 1.0 }?.let { close ->
             clvSum += OddsMath.computeClvPct(b.decimalOdds, close)
@@ -74,9 +119,22 @@ fun PicksScreen(app: EdgeLedgerApp) {
     val avgClv = if (clvCount > 0) clvSum / clvCount else null
 
     fun exportCsv() {
-        val header = "Date,Mode,Sport,League,Matchup,Pick,Bookmaker,Odds,ClosingOdds,Stake,Status\n"
+        val header = "Date,Mode,Sport,League,Matchup,Pick,Bookmaker,Odds,ClosingOdds,Stake,Status,SettledPnL\n"
         val body = bets.joinToString("\n") {
-            "${it.createdAtIso.take(10)},${if (it.isPaper) "PAPER" else "REAL"},${it.sport},\"${it.leagueName}\",\"${it.matchup}\",\"${it.selection}\",\"${it.bookmaker}\",${it.decimalOdds},${it.closingOdds ?: ""},${it.stakeAmount},${it.status}"
+            listOf(
+                csvEscapeSafe(it.createdAtIso.take(10)),
+                if (it.isPaper) "PAPER" else "REAL",
+                csvEscapeSafe(it.sport),
+                csvEscapeSafe(it.leagueName),
+                csvEscapeSafe(it.matchup),
+                csvEscapeSafe(it.selection),
+                csvEscapeSafe(it.bookmaker),
+                String.format(Locale.US, "%.2f", it.decimalOdds),
+                it.closingOdds?.let { co -> String.format(Locale.US, "%.2f", co) } ?: "",
+                String.format(Locale.US, "%.2f", it.stakeAmount),
+                it.status,
+                it.settledPnl?.let { pnl -> String.format(Locale.US, "%.2f", pnl) } ?: "",
+            ).joinToString(",")
         }
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -87,13 +145,27 @@ fun PicksScreen(app: EdgeLedgerApp) {
     }
 
     fun exportJson() {
-        val rows = bets.joinToString(",\n") {
-            """  {"id":"${it.id}","date":"${it.createdAtIso}","mode":"${if (it.isPaper) "paper" else "real"}","matchup":"${it.matchup}","selection":"${it.selection}","odds":${it.decimalOdds},"closingOdds":${it.closingOdds ?: "null"},"stake":${it.stakeAmount},"status":"${it.status}"}"""
+        val dtos = bets.map {
+            ExportedBetDto(
+                id = it.id,
+                date = it.createdAtIso,
+                mode = if (it.isPaper) "paper" else "real",
+                sport = it.sport,
+                league = it.leagueName,
+                matchup = it.matchup,
+                selection = it.selection,
+                bookmaker = it.bookmaker,
+                odds = it.decimalOdds,
+                closingOdds = it.closingOdds,
+                stake = it.stakeAmount,
+                status = it.status,
+                settledPnl = it.settledPnl,
+            )
         }
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Picks Backup (JSON)")
-            putExtra(Intent.EXTRA_TEXT, "[\n$rows\n]")
+            putExtra(Intent.EXTRA_TEXT, exportJsonCodec.encodeToString(dtos))
         }
         context.startActivity(Intent.createChooser(shareIntent, "Export Picks JSON"))
     }
@@ -110,7 +182,6 @@ fun PicksScreen(app: EdgeLedgerApp) {
             }
         }
 
-        // Real vs Paper-Trading (Shadow Bankroll) Switcher (TR-05)
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 TokenPill(
@@ -133,7 +204,12 @@ fun PicksScreen(app: EdgeLedgerApp) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricTile(if (isPaper) "Paper Bal" else "Balance", "$${(baseBalance + netPnl).roundToInt()}", null, Modifier.weight(1f))
-                MetricTile("Total Profit", "${if (netPnl >= 0) "+" else ""}$${netPnl.roundToInt()}", avgClv?.let { "CLV ${if (it >= 0) "+" else ""}${String.format("%.1f", it)}%" }, Modifier.weight(1f))
+                MetricTile(
+                    "Total Profit",
+                    "${if (netPnl >= 0) "+" else ""}$${netPnl.roundToInt()}",
+                    avgClv?.let { "CLV ${if (it >= 0) "+" else ""}${String.format(Locale.US, "%.1f", it)}%" },
+                    Modifier.weight(1f),
+                )
                 MetricTile("Win Rate", "$winRate%", "$won/$settled settled", Modifier.weight(1f))
             }
         }
@@ -173,7 +249,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
         } else {
             items(bets, key = { it.id }) { bet ->
                 var closingInput by remember(bet.id, bet.closingOdds) {
-                    mutableStateOf(bet.closingOdds?.let { String.format("%.2f", it) } ?: "")
+                    mutableStateOf(bet.closingOdds?.let { String.format(Locale.US, "%.2f", it) } ?: "")
                 }
                 val clvPct = bet.closingOdds?.takeIf { it > 1.0 }?.let { close ->
                     OddsMath.computeClvPct(bet.decimalOdds, close)
@@ -197,7 +273,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
                     )
                     if (clvPct != null) {
                         StatusBadge(
-                            text = "Closing Line Value: ${if (clvPct >= 0) "+" else ""}${String.format("%.1f", clvPct)}%",
+                            text = "Closing Line Value: ${if (clvPct >= 0) "+" else ""}${String.format(Locale.US, "%.1f", clvPct)}%",
                             color = if (clvPct >= 0) c.win else c.loss,
                             containerColor = if (clvPct >= 0) c.winDim else c.lossDim,
                         )
@@ -208,18 +284,18 @@ fun PicksScreen(app: EdgeLedgerApp) {
                             onValueChange = { closingInput = it },
                             label = { Text("Closing Odds") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.weight(1f),
                         )
                         OutlinedButton(
                             onClick = {
-                                closingInput.toDoubleOrNull()?.takeIf { it > 1.0 }?.let { v ->
+                                closingInput.toDoubleOrNull()?.takeIf { it.isFinite() && it > 1.0 }?.let { v ->
                                     scope.launch { app.database.dao().updateClosingOdds(bet.id, v) }
                                 }
                             },
                             shape = tokens.shapes.button,
                         ) { Text("Save CLV", color = c.accent, fontSize = scaledSp(11.5f), fontWeight = FontWeight.Bold) }
                     }
-                    // Full TR-03 Settlement States: Won, Lost, Push, Half-Win, Half-Loss, Void, Cash-Out
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         val states = listOf(
                             "WON" to "Won",
@@ -230,14 +306,17 @@ fun PicksScreen(app: EdgeLedgerApp) {
                             "VOID" to "Void",
                             "CASH_OUT" to "Cash-Out",
                         )
-                        items(states) { (code, lbl) ->
+                        items(states, key = { it.first }) { (code, lbl) ->
                             OutlinedButton(
-                                onClick = { scope.launch { app.database.dao().updateBetStatus(bet.id, code) } },
+                                onClick = {
+                                    val pnl = computeSettlementPnl(bet, code)
+                                    scope.launch { app.database.dao().updateBetStatus(bet.id, code, pnl) }
+                                },
                                 shape = tokens.shapes.button,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                             ) { Text(lbl, fontSize = scaledSp(11f), fontWeight = FontWeight.Bold) }
                         }
-                        item {
+                        item(key = "remove") {
                             OutlinedButton(
                                 onClick = { scope.launch { app.database.dao().deleteBet(bet.id) } },
                                 shape = tokens.shapes.button,

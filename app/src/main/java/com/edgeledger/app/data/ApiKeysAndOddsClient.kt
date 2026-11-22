@@ -1,12 +1,10 @@
 package com.edgeledger.app.data
 
+import com.edgeledger.app.engine.CsvAndFeedParsers
 import com.edgeledger.app.engine.RawUpcomingEvent
 import com.edgeledger.app.model.BookmakerOddsLine
 import com.edgeledger.app.model.Sport
-import java.io.IOException
-import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -17,13 +15,16 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.IOException
+import java.time.LocalDate
+import java.time.ZoneOffset
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * Optional user-supplied free-tier API keys and keyless prediction-market toggles.
- * Persist in Android Keystore-backed encrypted preferences; [toString] redacts all secrets.
- */
 @Serializable
 data class UserApiKeys(
     val theOddsApiKey: String = "",
@@ -55,9 +56,6 @@ data class UserApiKeys(
         if (secret.isBlank()) "<empty>" else "<configured:${secret.length}ch>"
 }
 
-/**
- * Per-provider quota and health snapshot surfaced in the API Health & Quota screen.
- */
 @Serializable
 data class ProviderQuotaStatus(
     val provider: String,
@@ -67,12 +65,6 @@ data class ProviderQuotaStatus(
     val lastStatus: String,
 )
 
-/**
- * Safe, non-crashing OkHttp 4.12 + kotlinx.serialization client for optional user-entered
- * free-tier sports/odds APIs and keyless prediction markets.
- *
- * Call all network methods off the Main thread (e.g. `Dispatchers.IO` or WorkManager).
- */
 class OptionalOddsAndDataClient(
     private val client: OkHttpClient,
 ) {
@@ -85,20 +77,14 @@ class OptionalOddsAndDataClient(
     private val callsByProvider = ConcurrentHashMap<String, AtomicInteger>()
     private val statusByProvider = ConcurrentHashMap<String, String>()
 
-    /**
-     * Fetches pre-match 1X2 / H2H decimal odds from The Odds API v4.
-     *
-     * Endpoint:
-     * `https://api.the-odds-api.com/v4/sports/{sportKey}/odds/?apiKey={key}&regions=eu,us&markets=h2h&oddsFormat=decimal`
-     *
-     * @return Map keyed by normalized lowercase `"$home::$away"` to bookmaker odds lines,
-     *         tagging sharp books/exchanges (Pinnacle, Betfair, Matchbook, etc.) with `isSharp = true`.
-     */
+    private fun sanitizeKey(raw: String): String =
+        raw.trim().filter { it in ' '..'~' }
+
     fun fetchTheOddsApi(
         sportKey: String,
         apiKey: String,
     ): Map<String, List<BookmakerOddsLine>> {
-        val cleanKey = apiKey.trim()
+        val cleanKey = sanitizeKey(apiKey)
         val cleanSport = sportKey.trim()
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_THE_ODDS_API, "Not configured")
@@ -108,33 +94,34 @@ class OptionalOddsAndDataClient(
             setStatus(PROVIDER_THE_ODDS_API, "Skipped: empty sportKey")
             return emptyMap()
         }
-
-        val url = "https://api.the-odds-api.com/v4/sports/"
-            .toHttpUrl()
-            .newBuilder()
-            .addPathSegment(cleanSport)
-            .addPathSegment("odds")
-            .addPathSegment("") // trailing slash matches /odds/
-            .addQueryParameter("apiKey", cleanKey)
-            .addQueryParameter("regions", "eu,us")
-            .addQueryParameter("markets", "h2h")
-            .addQueryParameter("oddsFormat", "decimal")
-            .build()
-
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-            .build()
+        val sportEnum = sportFromOddsKey(cleanSport)
+        val requiresDraw = cleanSport.startsWith("soccer_", ignoreCase = true)
 
         return try {
+            val url = "https://api.the-odds-api.com/v4/sports/"
+                .toHttpUrl()
+                .newBuilder()
+                .addPathSegment(cleanSport)
+                .addPathSegment("odds")
+                .addPathSegment("")
+                .addQueryParameter("apiKey", cleanKey)
+                .addQueryParameter("regions", "eu,us")
+                .addQueryParameter("markets", "h2h")
+                .addQueryParameter("oddsFormat", "decimal")
+                .build()
+
+            val request = Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
             incrementCalls(PROVIDER_THE_ODDS_API)
             client.newCall(request).execute().use { response ->
                 val remaining = response.header("x-requests-remaining")
                 val usedHeader = response.header("x-requests-used")?.toIntOrNull()
                 if (usedHeader != null) {
-                    callsByProvider.computeIfAbsent(PROVIDER_THE_ODDS_API) { AtomicInteger(0) }
-                        .set(usedHeader)
+                    callsByProvider.computeIfAbsent(PROVIDER_THE_ODDS_API) { AtomicInteger(0) }.set(usedHeader)
                 }
 
                 if (!response.isSuccessful) {
@@ -159,9 +146,9 @@ class OptionalOddsAndDataClient(
                 val result = LinkedHashMap<String, List<BookmakerOddsLine>>()
                 for (eventElem in root) {
                     val eventObj = eventElem as? JsonObject ?: continue
-                    val homeTeam = eventObj.stringOrNull("home_team")?.trim().orEmpty()
-                    val awayTeam = eventObj.stringOrNull("away_team")?.trim().orEmpty()
-                    if (homeTeam.isBlank() || awayTeam.isBlank()) continue
+                    val rawHome = eventObj.stringOrNull("home_team")?.trim().orEmpty()
+                    val rawAway = eventObj.stringOrNull("away_team")?.trim().orEmpty()
+                    if (rawHome.isBlank() || rawAway.isBlank()) continue
 
                     val bookmakers = eventObj.arrayOrNull("bookmakers") ?: continue
                     val lines = mutableListOf<BookmakerOddsLine>()
@@ -188,11 +175,11 @@ class OptionalOddsAndDataClient(
                             val outObj = outElem as? JsonObject ?: continue
                             val name = outObj.stringOrNull("name")?.trim().orEmpty()
                             val price = outObj.doubleOrNull("price") ?: continue
-                            if (price <= 1.0) continue
+                            if (!price.isFinite() || price <= 1.0 || price >= 1000.0) continue
 
                             when {
-                                name.equals(homeTeam, ignoreCase = true) -> homeOdds = price
-                                name.equals(awayTeam, ignoreCase = true) -> awayOdds = price
+                                name.equals(rawHome, ignoreCase = true) -> homeOdds = price
+                                name.equals(rawAway, ignoreCase = true) -> awayOdds = price
                                 name.equals("Draw", ignoreCase = true) ||
                                     name.equals("Tie", ignoreCase = true) -> drawOdds = price
                             }
@@ -200,11 +187,11 @@ class OptionalOddsAndDataClient(
 
                         val h = homeOdds
                         val a = awayOdds
-                        if (h != null && a != null) {
+                        if (h != null && a != null && (!requiresDraw || drawOdds != null)) {
                             lines.add(
                                 BookmakerOddsLine(
                                     bookmaker = bookTitle,
-                                    isSharp = isSharpBookmaker(bookKey, bookTitle),
+                                    isSharp = isSharpBookmaker(bookKey),
                                     homeOdds = h,
                                     drawOdds = drawOdds,
                                     awayOdds = a,
@@ -215,8 +202,9 @@ class OptionalOddsAndDataClient(
                     }
 
                     if (lines.isNotEmpty()) {
-                        val matchKey = normalizeMatchKey(homeTeam, awayTeam)
-                        // Sharp books first for downstream fair-value & CLV consumers
+                        val normHome = CsvAndFeedParsers.normalizeTeam(rawHome, sportEnum)
+                        val normAway = CsvAndFeedParsers.normalizeTeam(rawAway, sportEnum)
+                        val matchKey = normalizeMatchKey(normHome, normAway)
                         result[matchKey] = lines.sortedByDescending { it.isSharp }
                     }
                 }
@@ -225,6 +213,8 @@ class OptionalOddsAndDataClient(
                 setStatus(PROVIDER_THE_ODDS_API, "OK (${result.size} events$quotaNote)")
                 result
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: IOException) {
             setStatus(PROVIDER_THE_ODDS_API, "Network error: ${sanitizeError(e)}")
             emptyMap()
@@ -234,27 +224,29 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    /**
-     * Fetches upcoming football fixtures from Football-Data.org v4.
-     *
-     * Endpoint: `https://api.football-data.org/v4/matches` with `X-Auth-Token` header.
-     * Attribution: Football data provided by the Football-Data.org API.
-     */
     fun fetchFootballDataOrgFixtures(apiKey: String): List<RawUpcomingEvent> {
-        val cleanKey = apiKey.trim()
+        val cleanKey = sanitizeKey(apiKey)
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_FOOTBALL_DATA, "Not configured")
             return emptyList()
         }
 
-        val request = Request.Builder()
-            .url("https://api.football-data.org/v4/matches")
-            .header("X-Auth-Token", cleanKey)
-            .header("Accept", "application/json")
-            .get()
-            .build()
-
         return try {
+            val today = LocalDate.now(ZoneOffset.UTC)
+            val url = "https://api.football-data.org/v4/matches"
+                .toHttpUrl()
+                .newBuilder()
+                .addQueryParameter("dateFrom", today.toString())
+                .addQueryParameter("dateTo", today.plusDays(7).toString())
+                .build()
+
+            val request = Request.Builder()
+                .url(url)
+                .header("X-Auth-Token", cleanKey)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
             incrementCalls(PROVIDER_FOOTBALL_DATA)
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -289,21 +281,18 @@ class OptionalOddsAndDataClient(
                     if (kickoffIso.isBlank()) continue
 
                     val compObj = matchObj.objectOrNull("competition")
-                    val leagueId = compObj?.stringOrNull("code")
-                        ?: compObj?.stringOrNull("id")
-                        ?: "football_data"
+                    val rawCode = compObj?.stringOrNull("code")?.uppercase(Locale.US).orEmpty()
+                    val leagueId = FOOTBALL_DATA_CODE_MAP[rawCode]
+                        ?: rawCode.ifBlank { compObj?.stringOrNull("id") ?: "football_data" }
                     val leagueName = compObj?.stringOrNull("name") ?: leagueId
 
                     val homeObj = matchObj.objectOrNull("homeTeam")
                     val awayObj = matchObj.objectOrNull("awayTeam")
-                    val homeTeam = homeObj?.stringOrNull("name")
-                        ?: homeObj?.stringOrNull("shortName")
-                        ?: continue
-                    val awayTeam = awayObj?.stringOrNull("name")
-                        ?: awayObj?.stringOrNull("shortName")
-                        ?: continue
-
-                    if (homeTeam.isBlank() || awayTeam.isBlank()) continue
+                    val rawHome = homeObj?.stringOrNull("name") ?: homeObj?.stringOrNull("shortName") ?: continue
+                    val rawAway = awayObj?.stringOrNull("name") ?: awayObj?.stringOrNull("shortName") ?: continue
+                    val homeTeam = CsvAndFeedParsers.normalizeTeam(rawHome, Sport.FOOTBALL)
+                    val awayTeam = CsvAndFeedParsers.normalizeTeam(rawAway, Sport.FOOTBALL)
+                    if (homeTeam.isBlank() || awayTeam.isBlank() || homeTeam == awayTeam) continue
 
                     events.add(
                         RawUpcomingEvent(
@@ -312,10 +301,12 @@ class OptionalOddsAndDataClient(
                             leagueId = leagueId,
                             leagueName = leagueName,
                             kickoffIso = kickoffIso,
-                            homeTeam = homeTeam.trim(),
-                            awayTeam = awayTeam.trim(),
-                            surface = "",
+                            homeTeam = homeTeam,
+                            awayTeam = awayTeam,
+                            surface = null,
                             bookOdds = emptyList(),
+                            homeLogoUrl = homeObj?.stringOrNull("crest"),
+                            awayLogoUrl = awayObj?.stringOrNull("crest"),
                         ),
                     )
                 }
@@ -323,6 +314,8 @@ class OptionalOddsAndDataClient(
                 setStatus(PROVIDER_FOOTBALL_DATA, "OK (${events.size} fixtures)")
                 events
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: IOException) {
             setStatus(PROVIDER_FOOTBALL_DATA, "Network error: ${sanitizeError(e)}")
             emptyList()
@@ -332,21 +325,14 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    /**
-     * Fetches open binary prediction markets from Polymarket's keyless Gamma API.
-     *
-     * Endpoint: `https://gamma-api.polymarket.com/markets?closed=false&limit=30`
-     *
-     * @return List of `(marketQuestion, impliedYesProbability)` pairs where probability is in `[0.0, 1.0]`.
-     */
     fun fetchPolymarketOdds(): List<Pair<String, Double>> {
-        val request = Request.Builder()
-            .url("https://gamma-api.polymarket.com/markets?closed=false&limit=30")
-            .header("Accept", "application/json")
-            .get()
-            .build()
-
         return try {
+            val request = Request.Builder()
+                .url("https://gamma-api.polymarket.com/markets?closed=false&limit=60")
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
             incrementCalls(PROVIDER_POLYMARKET)
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -369,17 +355,19 @@ class OptionalOddsAndDataClient(
                 for (marketElem in markets) {
                     val marketObj = marketElem as? JsonObject ?: continue
                     val question = marketObj.stringOrNull("question")?.trim().orEmpty()
-                    if (question.isBlank()) continue
+                    if (question.isBlank() || !isSportsMarketQuestion(question)) continue
 
                     val yesProb = extractPolymarketYesProbability(marketObj) ?: continue
-                    if (yesProb in 0.0..1.0) {
+                    if (yesProb.isFinite() && yesProb in 0.01..0.99) {
                         pairs.add(question to yesProb)
                     }
                 }
 
-                setStatus(PROVIDER_POLYMARKET, "OK (${pairs.size} markets)")
+                setStatus(PROVIDER_POLYMARKET, "OK (${pairs.size} sports markets)")
                 pairs
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: IOException) {
             setStatus(PROVIDER_POLYMARKET, "Network error: ${sanitizeError(e)}")
             emptyList()
@@ -389,32 +377,27 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    /**
-     * Fetches current and upcoming cricket matches from CricketData.org (CricAPI v1).
-     *
-     * Endpoint: `https://api.cricapi.com/v1/currentMatches?apikey={key}&offset=0`
-     */
     fun fetchCricketMatches(apiKey: String): List<RawUpcomingEvent> {
-        val cleanKey = apiKey.trim()
+        val cleanKey = sanitizeKey(apiKey)
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_CRICKET_DATA, "Not configured")
             return emptyList()
         }
 
-        val url = "https://api.cricapi.com/v1/currentMatches"
-            .toHttpUrl()
-            .newBuilder()
-            .addQueryParameter("apikey", cleanKey)
-            .addQueryParameter("offset", "0")
-            .build()
-
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-            .build()
-
         return try {
+            val url = "https://api.cricapi.com/v1/currentMatches"
+                .toHttpUrl()
+                .newBuilder()
+                .addQueryParameter("apikey", cleanKey)
+                .addQueryParameter("offset", "0")
+                .build()
+
+            val request = Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
             incrementCalls(PROVIDER_CRICKET_DATA)
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -435,8 +418,7 @@ class OptionalOddsAndDataClient(
 
                 val apiStatus = root.stringOrNull("status").orEmpty()
                 if (apiStatus.equals("failure", ignoreCase = true)) {
-                    val reason = root.stringOrNull("reason") ?: "API failure"
-                    setStatus(PROVIDER_CRICKET_DATA, reason)
+                    setStatus(PROVIDER_CRICKET_DATA, root.stringOrNull("reason") ?: "API failure")
                     return emptyList()
                 }
 
@@ -454,12 +436,9 @@ class OptionalOddsAndDataClient(
                     if (id.isBlank()) continue
 
                     val teams = extractCricketTeams(matchObj)
-                    if (teams.size < 2) continue
+                    if (teams.size < 2 || teams[0] == teams[1]) continue
 
-                    val matchType = matchObj.stringOrNull("matchType")
-                        ?.trim()
-                        ?.lowercase(Locale.US)
-                        .orEmpty()
+                    val matchType = matchObj.stringOrNull("matchType")?.trim()?.lowercase(Locale.US).orEmpty()
                     val leagueId = if (matchType.isNotBlank()) "cricket_$matchType" else "cricket"
                     val leagueName = matchObj.stringOrNull("name")
                         ?.substringAfter(",", "")
@@ -467,10 +446,8 @@ class OptionalOddsAndDataClient(
                         ?.takeIf { it.isNotBlank() }
                         ?: matchType.uppercase(Locale.US).ifBlank { "Cricket" }
 
-                    val kickoffIso = matchObj.stringOrNull("dateTimeGMT")
-                        ?.takeIf { it.isNotBlank() }
+                    val kickoffIso = matchObj.stringOrNull("dateTimeGMT")?.takeIf { it.isNotBlank() }
                         ?: matchObj.stringOrNull("date").orEmpty()
-                    val venue = matchObj.stringOrNull("venue").orEmpty()
 
                     events.add(
                         RawUpcomingEvent(
@@ -481,7 +458,7 @@ class OptionalOddsAndDataClient(
                             kickoffIso = kickoffIso,
                             homeTeam = teams[0],
                             awayTeam = teams[1],
-                            surface = venue,
+                            surface = matchObj.stringOrNull("venue")?.takeIf { it.isNotBlank() },
                             bookOdds = emptyList(),
                         ),
                     )
@@ -490,6 +467,8 @@ class OptionalOddsAndDataClient(
                 setStatus(PROVIDER_CRICKET_DATA, "OK (${events.size} matches)")
                 events
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: IOException) {
             setStatus(PROVIDER_CRICKET_DATA, "Network error: ${sanitizeError(e)}")
             emptyList()
@@ -499,21 +478,14 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    /**
-     * Fetches open prediction markets from Kalshi's keyless public market-data REST API.
-     *
-     * Endpoint: `https://external-api.kalshi.com/trade-api/v2/markets?status=open&limit=25`
-     *
-     * @return List of `(marketTitle, impliedYesProbability)` pairs where probability is in `[0.0, 1.0]`.
-     */
     fun fetchKalshiOdds(): List<Pair<String, Double>> {
-        val request = Request.Builder()
-            .url("https://external-api.kalshi.com/trade-api/v2/markets?status=open&limit=25")
-            .header("Accept", "application/json")
-            .get()
-            .build()
-
         return try {
+            val request = Request.Builder()
+                .url("https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=60")
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
             incrementCalls(PROVIDER_KALSHI)
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -540,20 +512,21 @@ class OptionalOddsAndDataClient(
                 val pairs = mutableListOf<Pair<String, Double>>()
                 for (marketElem in markets) {
                     val marketObj = marketElem as? JsonObject ?: continue
-                    val title = marketObj.stringOrNull("title")
-                        ?.takeIf { it.isNotBlank() }
+                    val title = marketObj.stringOrNull("title")?.takeIf { it.isNotBlank() }
                         ?: marketObj.stringOrNull("ticker").orEmpty()
-                    if (title.isBlank()) continue
+                    if (title.isBlank() || !isSportsMarketQuestion(title)) continue
 
                     val yesProb = extractKalshiYesProbability(marketObj) ?: continue
-                    if (yesProb in 0.0..1.0) {
+                    if (yesProb.isFinite() && yesProb in 0.01..0.99) {
                         pairs.add(title.trim() to yesProb)
                     }
                 }
 
-                setStatus(PROVIDER_KALSHI, "OK (${pairs.size} markets)")
+                setStatus(PROVIDER_KALSHI, "OK (${pairs.size} sports markets)")
                 pairs
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: IOException) {
             setStatus(PROVIDER_KALSHI, "Network error: ${sanitizeError(e)}")
             emptyList()
@@ -563,33 +536,26 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    /**
-     * Fetches pre-game fixtures from OddsPapi v4 (supports sharp books like Pinnacle/Betfair).
-     *
-     * Endpoint: `https://api.oddspapi.io/v4/fixtures?apiKey={key}`
-     *
-     * @return Raw JSON array elements (or empty list on error) while updating OddsPapi quota status.
-     */
     fun fetchOddsPapiFixtures(apiKey: String): List<JsonObject> {
-        val cleanKey = apiKey.trim()
+        val cleanKey = sanitizeKey(apiKey)
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_ODDSPAPI, "Not configured")
             return emptyList()
         }
 
-        val url = "https://api.oddspapi.io/v4/fixtures"
-            .toHttpUrl()
-            .newBuilder()
-            .addQueryParameter("apiKey", cleanKey)
-            .build()
-
-        val request = Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .get()
-            .build()
-
         return try {
+            val url = "https://api.oddspapi.io/v4/fixtures"
+                .toHttpUrl()
+                .newBuilder()
+                .addQueryParameter("apiKey", cleanKey)
+                .build()
+
+            val request = Request.Builder()
+                .url(url)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
             incrementCalls(PROVIDER_ODDSPAPI)
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -616,6 +582,8 @@ class OptionalOddsAndDataClient(
                 setStatus(PROVIDER_ODDSPAPI, "OK (${fixtures.size} fixtures)")
                 fixtures
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: IOException) {
             setStatus(PROVIDER_ODDSPAPI, "Network error: ${sanitizeError(e)}")
             emptyList()
@@ -625,28 +593,30 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    /**
-     * Performs a lightweight authenticated GET against an API-Sports endpoint using `x-apisports-key`.
-     * Defaults to the free `/status` endpoint on API-Football v3 (0 quota cost).
-     */
     fun fetchApiSportsJson(
         apiKey: String,
         endpointUrl: String = "https://v3.football.api-sports.io/status",
     ): JsonObject? {
-        val cleanKey = apiKey.trim()
+        val cleanKey = sanitizeKey(apiKey)
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_API_SPORTS, "Not configured")
             return null
         }
 
-        val request = Request.Builder()
-            .url(endpointUrl)
-            .header("x-apisports-key", cleanKey)
-            .header("Accept", "application/json")
-            .get()
-            .build()
+        val parsedUrl = endpointUrl.toHttpUrlOrNull()
+        if (parsedUrl == null || parsedUrl.scheme != "https" || !parsedUrl.host.endsWith(".api-sports.io")) {
+            setStatus(PROVIDER_API_SPORTS, "Blocked: untrusted endpoint")
+            return null
+        }
 
         return try {
+            val request = Request.Builder()
+                .url(parsedUrl)
+                .header("x-apisports-key", cleanKey)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
             incrementCalls(PROVIDER_API_SPORTS)
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -664,6 +634,8 @@ class OptionalOddsAndDataClient(
                 setStatus(PROVIDER_API_SPORTS, if (obj != null) "OK" else "Unexpected JSON payload")
                 obj
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: IOException) {
             setStatus(PROVIDER_API_SPORTS, "Network error: ${sanitizeError(e)}")
             null
@@ -673,56 +645,17 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    /**
-     * Returns the current quota and health summary for every supported optional provider.
-     */
     fun getQuotaSummary(keys: UserApiKeys): List<ProviderQuotaStatus> = listOf(
-        buildQuotaStatus(
-            provider = PROVIDER_THE_ODDS_API,
-            freeLimitLabel = "500 credits/mo",
-            configured = keys.theOddsApiKey.isNotBlank(),
-        ),
-        buildQuotaStatus(
-            provider = PROVIDER_FOOTBALL_DATA,
-            freeLimitLabel = "10 calls/min (Free Forever)",
-            configured = keys.footballDataOrgKey.isNotBlank(),
-        ),
-        buildQuotaStatus(
-            provider = PROVIDER_ODDSPAPI,
-            freeLimitLabel = "250 req/mo",
-            configured = keys.oddsPapiKey.isNotBlank(),
-        ),
-        buildQuotaStatus(
-            provider = PROVIDER_CRICKET_DATA,
-            freeLimitLabel = "100 hits/day",
-            configured = keys.cricketDataKey.isNotBlank(),
-        ),
-        buildQuotaStatus(
-            provider = PROVIDER_API_SPORTS,
-            freeLimitLabel = "100 req/day per sport",
-            configured = keys.apiSportsKey.isNotBlank(),
-        ),
-        buildQuotaStatus(
-            provider = PROVIDER_POLYMARKET,
-            freeLimitLabel = "Keyless (~300 req/10s)",
-            configured = keys.enablePolymarket,
-        ),
-        buildQuotaStatus(
-            provider = PROVIDER_KALSHI,
-            freeLimitLabel = "Keyless (public REST)",
-            configured = keys.enableKalshi,
-        ),
+        buildQuotaStatus(PROVIDER_THE_ODDS_API, "500 credits/mo", keys.theOddsApiKey.isNotBlank()),
+        buildQuotaStatus(PROVIDER_FOOTBALL_DATA, "10 calls/min (Free Forever)", keys.footballDataOrgKey.isNotBlank()),
+        buildQuotaStatus(PROVIDER_ODDSPAPI, "250 req/mo", keys.oddsPapiKey.isNotBlank()),
+        buildQuotaStatus(PROVIDER_CRICKET_DATA, "100 hits/day", keys.cricketDataKey.isNotBlank()),
+        buildQuotaStatus(PROVIDER_API_SPORTS, "100 req/day per sport", keys.apiSportsKey.isNotBlank()),
+        buildQuotaStatus(PROVIDER_POLYMARKET, "Keyless (~300 req/10s)", keys.enablePolymarket),
+        buildQuotaStatus(PROVIDER_KALSHI, "Keyless (public REST)", keys.enableKalshi),
     )
 
-    // -------------------------------------------------------------------------
-    // Internal parsing & normalization helpers
-    // -------------------------------------------------------------------------
-
-    private fun buildQuotaStatus(
-        provider: String,
-        freeLimitLabel: String,
-        configured: Boolean,
-    ): ProviderQuotaStatus {
+    private fun buildQuotaStatus(provider: String, freeLimitLabel: String, configured: Boolean): ProviderQuotaStatus {
         val calls = callsByProvider[provider]?.get() ?: 0
         val defaultStatus = if (configured) "Ready" else "Disabled / No key"
         return ProviderQuotaStatus(
@@ -745,7 +678,7 @@ class OptionalOddsAndDataClient(
     private fun extractPolymarketYesProbability(marketObj: JsonObject): Double? {
         val outcomes = parseStringOrJsonArray(marketObj["outcomes"])
         val prices = parseStringOrJsonArray(marketObj["outcomePrices"])
-            .mapNotNull { it.toDoubleOrNull() }
+            .mapNotNull { it.toDoubleOrNull()?.takeIf { d -> d.isFinite() } }
 
         if (prices.isNotEmpty()) {
             val yesIndex = outcomes.indexOfFirst { it.equals("Yes", ignoreCase = true) }
@@ -753,25 +686,26 @@ class OptionalOddsAndDataClient(
             return prices[resolvedIndex]
         }
 
-        // Fallback to order-book midpoint or last trade price when outcomePrices is absent
-        val bestBid = marketObj.doubleOrNull("bestBid")
-        val bestAsk = marketObj.doubleOrNull("bestAsk")
+        val bestBid = marketObj.doubleOrNull("bestBid")?.takeIf { it.isFinite() }
+        val bestAsk = marketObj.doubleOrNull("bestAsk")?.takeIf { it.isFinite() }
         if (bestBid != null && bestAsk != null && bestBid in 0.0..1.0 && bestAsk in 0.0..1.0) {
             return (bestBid + bestAsk) / 2.0
         }
-        return marketObj.doubleOrNull("lastTradePrice")
+        return marketObj.doubleOrNull("lastTradePrice")?.takeIf { it.isFinite() }
     }
 
+    /**
+     * Kalshi v2 returns integer cents (0..100) for `yes_bid`, `yes_ask`, `last_price`.
+     * Require an active, reasonably tight two-sided quote (`yesBid > 0 && yesAsk > 0 && spread <= 20c`).
+     */
     private fun extractKalshiYesProbability(marketObj: JsonObject): Double? {
-        // Kalshi v2 returns prices in cents (0..100) or dollar strings (e.g. "0.54")
-        val yesBid = marketObj.doubleOrNull("yes_bid")
-        val yesAsk = marketObj.doubleOrNull("yes_ask")
-        if (yesBid != null && yesAsk != null && (yesBid > 0.0 || yesAsk > 0.0)) {
-            val mid = (yesBid + yesAsk) / 2.0
-            return if (mid > 1.0) mid / 100.0 else mid
+        val yesBid = marketObj.doubleOrNull("yes_bid")?.takeIf { it.isFinite() }
+        val yesAsk = marketObj.doubleOrNull("yes_ask")?.takeIf { it.isFinite() }
+        if (yesBid != null && yesAsk != null && yesBid > 0.0 && yesAsk > 0.0 && (yesAsk - yesBid) in 0.0..20.0) {
+            return ((yesBid + yesAsk) / 2.0) / 100.0
         }
-        val lastPrice = marketObj.doubleOrNull("last_price") ?: return null
-        return if (lastPrice > 1.0) lastPrice / 100.0 else lastPrice
+        val lastPrice = marketObj.doubleOrNull("last_price")?.takeIf { it.isFinite() && it in 1.0..99.0 } ?: return null
+        return lastPrice / 100.0
     }
 
     private fun parseStringOrJsonArray(element: JsonElement?): List<String> {
@@ -797,65 +731,56 @@ class OptionalOddsAndDataClient(
             ?.filter { it.isNotBlank() }
             .orEmpty()
         if (teams.size >= 2) return teams
-
         return matchObj.arrayOrNull("teamInfo")
             ?.mapNotNull { (it as? JsonObject)?.stringOrNull("name")?.trim() }
             ?.filter { it.isNotBlank() }
             .orEmpty()
     }
 
-    private fun isSharpBookmaker(key: String, title: String): Boolean {
-        val normalizedKey = key.trim().lowercase(Locale.US)
-        val normalizedTitle = title.trim().lowercase(Locale.US)
-        return SHARP_BOOK_KEYWORDS.any { sharp ->
-            normalizedKey.contains(sharp) || normalizedTitle.contains(sharp)
-        }
+    private fun isSharpBookmaker(key: String): Boolean =
+        key.trim().lowercase(Locale.US) in SHARP_BOOK_KEYS
+
+    private fun sportFromOddsKey(sportKey: String): Sport = when {
+        sportKey.startsWith("soccer_", ignoreCase = true) -> Sport.FOOTBALL
+        sportKey.startsWith("americanfootball_", ignoreCase = true) -> Sport.NFL
+        sportKey.startsWith("basketball_", ignoreCase = true) -> Sport.NBA
+        sportKey.startsWith("icehockey_", ignoreCase = true) -> Sport.NHL
+        sportKey.startsWith("baseball_", ignoreCase = true) -> Sport.MLB
+        sportKey.startsWith("tennis_", ignoreCase = true) -> Sport.TENNIS
+        else -> Sport.FOOTBALL
     }
 
     private fun normalizeMatchKey(home: String, away: String): String =
-        "${normalizeTeamName(home)}::${normalizeTeamName(away)}"
+        "${home.trim().lowercase(Locale.US).replace(WHITESPACE_REGEX, " ")}::${away.trim().lowercase(Locale.US).replace(WHITESPACE_REGEX, " ")}"
 
-    private fun normalizeTeamName(name: String): String =
-        name.trim().lowercase(Locale.US).replace(WHITESPACE_REGEX, " ")
-
-
-    private fun isSportsMarketQuestion(question: String): Boolean {
+    internal fun isSportsMarketQuestion(question: String): Boolean {
         val q = question.lowercase(Locale.US)
         val blocked = listOf(
             "trump", "biden", "xi jinping", "democrat", "republican", "election", "president",
             "senate", "congress", "governor", "nominee", "primary", "fed ", "interest rate",
             "tariff", "bitcoin", "btc", "ethereum", "crypto", "inflation", "recession", "ukraine",
-            "china", "israel", "gaza", "nato", "supreme court", "cabinet", "pardon", "oscar", "grammy"
+            "china", "israel", "gaza", "nato", "supreme court", "cabinet", "pardon", "oscar", "grammy",
         )
         if (blocked.any { it in q }) return false
         val allowed = listOf(
             "nba", "nfl", "nhl", "mlb", "premier league", "champions league", "la liga", "bundesliga",
             "serie a", "ligue 1", "world cup", "super bowl", "stanley cup", "world series",
             "ufc", "mma", "formula 1", "f1", "grand prix", "atp", "wta", "wimbledon", "us open",
-            "cricket", "ipl", " vs ", " vs. ", "beat ", "playoffs", "mvp", "fc ", "united", "city"
+            "cricket", "ipl", " vs ", " vs. ", "beat ", "playoffs", "mvp", "fc ", "united", "city",
         )
         return allowed.any { it in q }
     }
 
-    private fun sanitizeError(e: Throwable): String {
-        val raw = e.message?.take(120) ?: e::class.simpleName ?: "Unknown error"
-        return raw.replace(SECRET_QUERY_REGEX, "$1=REDACTED")
+    internal fun sanitizeError(e: Throwable): String {
+        val raw = e.message ?: e::class.simpleName ?: "Unknown error"
+        return raw.replace(SECRET_QUERY_REGEX, "$1=REDACTED").take(120)
     }
 
-    private fun JsonObject.stringOrNull(key: String): String? =
-        (this[key] as? JsonPrimitive)?.contentOrNull
-
-    private fun JsonObject.doubleOrNull(key: String): Double? =
-        (this[key] as? JsonPrimitive)?.doubleOrNull
-
-    private fun JsonObject.booleanOrNull(key: String): Boolean? =
-        (this[key] as? JsonPrimitive)?.booleanOrNull
-
-    private fun JsonObject.objectOrNull(key: String): JsonObject? =
-        this[key] as? JsonObject
-
-    private fun JsonObject.arrayOrNull(key: String): JsonArray? =
-        this[key] as? JsonArray
+    private fun JsonObject.stringOrNull(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+    private fun JsonObject.doubleOrNull(key: String): Double? = (this[key] as? JsonPrimitive)?.doubleOrNull
+    private fun JsonObject.booleanOrNull(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
+    private fun JsonObject.objectOrNull(key: String): JsonObject? = this[key] as? JsonObject
+    private fun JsonObject.arrayOrNull(key: String): JsonArray? = this[key] as? JsonArray
 
     companion object {
         const val PROVIDER_THE_ODDS_API = "The Odds API"
@@ -866,8 +791,11 @@ class OptionalOddsAndDataClient(
         const val PROVIDER_POLYMARKET = "Polymarket"
         const val PROVIDER_KALSHI = "Kalshi"
 
-        private val SHARP_BOOK_KEYWORDS = setOf(
+        private val SHARP_BOOK_KEYS = setOf(
             "pinnacle",
+            "betfair_ex_eu",
+            "betfair_ex_uk",
+            "betfair_ex_au",
             "betfair",
             "matchbook",
             "smarkets",
@@ -877,6 +805,15 @@ class OptionalOddsAndDataClient(
             "betcris",
             "polymarket",
             "kalshi",
+        )
+
+        private val FOOTBALL_DATA_CODE_MAP = mapOf(
+            "PL" to "E0",
+            "ELC" to "E1",
+            "PD" to "SP1",
+            "BL1" to "D1",
+            "SA" to "I1",
+            "FL1" to "F1",
         )
 
         private val EXCLUDED_FOOTBALL_STATUSES = setOf(

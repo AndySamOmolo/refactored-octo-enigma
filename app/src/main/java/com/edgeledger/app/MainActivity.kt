@@ -1,5 +1,6 @@
 package com.edgeledger.app
 
+import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -12,8 +13,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.automirrored.outlined.CompareArrows
+import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.QueryStats
 import androidx.compose.material.icons.outlined.Settings
@@ -25,11 +26,14 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -48,7 +52,6 @@ import com.edgeledger.app.ui.screens.GamesScreen
 import com.edgeledger.app.ui.screens.MatchDetailScreen
 import com.edgeledger.app.ui.screens.PicksScreen
 import com.edgeledger.app.ui.screens.SettingsScreen
-import android.net.Uri
 
 private data class BottomTab(val route: String, val label: String, val icon: ImageVector)
 
@@ -59,7 +62,6 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val app = application as EdgeLedgerApp
-        // Zero-flash cold start: hold splash until DataStore theme loads (TH-06)
         splash.setKeepOnScreenCondition { !app.prefsRepo.loaded.value }
 
         setContent {
@@ -81,13 +83,15 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: "games"
 
-    val tabs = listOf(
-        BottomTab("games", "Games", Icons.Outlined.EmojiEvents),
-        BottomTab("compare", "Compare", Icons.AutoMirrored.Outlined.CompareArrows),
-        BottomTab("accuracy", "Accuracy", Icons.Outlined.QueryStats),
-        BottomTab("picks", "Picks", Icons.Outlined.BookmarkBorder),
-        BottomTab("settings", "Settings", Icons.Outlined.Settings),
-    )
+    val tabs = remember {
+        listOf(
+            BottomTab("games", "Games", Icons.Outlined.EmojiEvents),
+            BottomTab("compare", "Compare", Icons.AutoMirrored.Outlined.CompareArrows),
+            BottomTab("accuracy", "Accuracy", Icons.Outlined.QueryStats),
+            BottomTab("picks", "Picks", Icons.Outlined.BookmarkBorder),
+            BottomTab("settings", "Settings", Icons.Outlined.Settings),
+        )
+    }
 
     val showBottomBar = tabs.any { it.route == currentRoute }
 
@@ -124,26 +128,31 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
                                     }
                                 },
                                 icon = {
-                                    // AX-03: Long-press Settings icon triggers Safe Mode Theme Reset
                                     if (tab.route == "settings") {
                                         Box(
-                                            modifier = Modifier.combinedClickable(
-                                                onClick = {
-                                                    if (!selected) {
-                                                        navController.navigate("settings") {
-                                                            popUpTo("games") { saveState = true }
-                                                            launchSingleTop = true
-                                                            restoreState = true
+                                            modifier = Modifier
+                                                .semantics { contentDescription = "Settings. Long-press to reset theme." }
+                                                .combinedClickable(
+                                                    onClick = {
+                                                        if (!selected) {
+                                                            navController.navigate("settings") {
+                                                                popUpTo("games") { saveState = true }
+                                                                launchSingleTop = true
+                                                                restoreState = true
+                                                            }
                                                         }
-                                                    }
-                                                },
-                                                onLongClick = {
-                                                    app.prefsRepo.resetTheme()
-                                                    Toast.makeText(context, "Safe Mode: Theme reset to Midnight Broadcast", Toast.LENGTH_SHORT).show()
-                                                },
-                                            ),
+                                                    },
+                                                    onLongClick = {
+                                                        app.prefsRepo.resetTheme()
+                                                        Toast.makeText(
+                                                            context,
+                                                            "Safe Mode: Theme reset to Midnight Broadcast",
+                                                            Toast.LENGTH_SHORT,
+                                                        ).show()
+                                                    },
+                                                ),
                                         ) {
-                                            Icon(tab.icon, contentDescription = "Settings (Long-press to reset theme)")
+                                            Icon(tab.icon, contentDescription = null)
                                         }
                                     } else {
                                         Icon(tab.icon, contentDescription = tab.label)

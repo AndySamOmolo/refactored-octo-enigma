@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -37,21 +38,27 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.edgeledger.app.BuildConfig
 import com.edgeledger.app.EdgeLedgerApp
 import com.edgeledger.app.engine.DevigMethod
 import com.edgeledger.app.engine.LineMovePoint
@@ -85,6 +92,7 @@ import com.edgeledger.app.ui.components.TeamAvatar
 import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.scaledSp
 import kotlinx.coroutines.launch
+import java.util.Locale
 import kotlin.math.roundToInt
 
 @Composable
@@ -103,27 +111,28 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     val quotas by app.syncRepo.providerQuotas.collectAsStateWithLifecycle()
     val syncing by app.syncRepo.syncing.collectAsStateWithLifecycle()
 
-    // 0 = Theme Studio, 1 = API Keys, 2 = Model & Odds, 3 = Alerts & Credits
-    var sectionTab by remember { mutableIntStateOf(0) }
-
-    // Theme Studio state
-    var advancedMode by remember { mutableStateOf(false) }
-    var previewTab by remember { mutableIntStateOf(0) } // 0 = Match, 1 = Player Prop, 2 = Line Chart
-    var activeColorRole by remember { mutableIntStateOf(0) }
-    var customThemeName by remember { mutableStateOf("") }
+    var sectionTab by rememberSaveable { mutableIntStateOf(0) }
+    var advancedMode by rememberSaveable { mutableStateOf(false) }
+    var previewTab by rememberSaveable { mutableIntStateOf(0) }
+    var activeColorRole by rememberSaveable { mutableIntStateOf(0) }
+    var customThemeName by rememberSaveable { mutableStateOf("") }
     var importJsonText by remember { mutableStateOf("") }
     var statusMsg by remember { mutableStateOf<String?>(null) }
 
-    // API Keys state
     var oddsApiInput by remember(apiKeys.theOddsApiKey) { mutableStateOf(apiKeys.theOddsApiKey) }
     var fdOrgInput by remember(apiKeys.footballDataOrgKey) { mutableStateOf(apiKeys.footballDataOrgKey) }
     var oddsPapiInput by remember(apiKeys.oddsPapiKey) { mutableStateOf(apiKeys.oddsPapiKey) }
     var cricketInput by remember(apiKeys.cricketDataKey) { mutableStateOf(apiKeys.cricketDataKey) }
     var apiSportsInput by remember(apiKeys.apiSportsKey) { mutableStateOf(apiKeys.apiSportsKey) }
 
-    // Budget state
     var balanceInput by remember(prefs.bankroll) { mutableStateOf(prefs.bankroll.toInt().toString()) }
     var paperInput by remember(prefs.paperBankroll) { mutableStateOf(prefs.paperBankroll.toInt().toString()) }
+
+    // Debounced local slider states to prevent DataStore write & undo-stack spam during drags
+    var localCornerDp by remember(config.cardCornerOverrideDp) { mutableFloatStateOf((config.cardCornerOverrideDp ?: 16).toFloat()) }
+    var localFontScale by remember(config.fontScale) { mutableFloatStateOf(config.fontScale) }
+    var localMinEv by remember(prefs.minEvPct) { mutableFloatStateOf(prefs.minEvPct.toFloat()) }
+    var localMinProb by remember(prefs.minProbFloorPct) { mutableFloatStateOf(prefs.minProbFloorPct.toFloat()) }
 
     val colorRoles = listOf(
         "Accent" to config.accentHex,
@@ -165,13 +174,12 @@ fun SettingsScreen(app: EdgeLedgerApp) {
         contentPadding = PaddingValues(tokens.spacing.screenPadding),
         verticalArrangement = Arrangement.spacedBy(tokens.spacing.itemGap),
     ) {
-        // Settings Header
         item {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text("Settings", color = c.text, fontSize = scaledSp(21f), fontWeight = FontWeight.ExtraBold)
                     StatusBadge(
-                        text = "WCAG ${String.format("%.1f", textContrast)}:1 ${when { textContrast >= 7.0f -> "AAA"; textContrast >= 4.5f -> "AA"; else -> "FAIL" }}",
+                        text = "WCAG ${String.format(Locale.US, "%.1f", textContrast)}:1 ${when { textContrast >= 7.0f -> "AAA"; textContrast >= 4.5f -> "AA"; else -> "FAIL" }}",
                         color = if (textContrast >= 4.5f) c.win else c.loss,
                         containerColor = if (textContrast >= 4.5f) c.winDim else c.lossDim,
                     )
@@ -180,11 +188,10 @@ fun SettingsScreen(app: EdgeLedgerApp) {
             }
         }
 
-        // 4-Section Settings Switcher
         item {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val sections = listOf("Theme Studio", "API Keys", "Model & Odds", "Alerts & Info")
-                items(sections.indices.toList()) { idx ->
+                items(sections.indices.toList(), key = { it }) { idx ->
                     TokenPill(
                         label = sections[idx],
                         selected = sectionTab == idx,
@@ -205,15 +212,13 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     border = BorderStroke(1.dp, c.accent),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(statusMsg!!, color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(12.5f), modifier = Modifier.padding(10.dp))
+                    Text(statusMsg.orEmpty(), color = c.accent, fontWeight = FontWeight.Bold, fontSize = scaledSp(12.5f), modifier = Modifier.padding(10.dp))
                 }
             }
         }
 
         when (sectionTab) {
-            // ================= 0: THEME STUDIO (V6.0 FULL ENGINE) =================
             0 -> {
-                // Simple vs Advanced Editor Toggle (ED-02)
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         TokenPill("Simple Editor", !advancedMode, { advancedMode = false; activeColorRole = activeColorRole.coerceIn(0, 3) }, Modifier.weight(1f))
@@ -221,7 +226,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     }
                 }
 
-                // Tabbed Live Preview (ED-06): Match Card | Player Prop | Line Chart
                 item {
                     SectionCard(useHeroGradient = true) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -256,17 +260,17 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                 PlayerPropCard(
                                     prop = PlayerPropPrediction(
                                         id = "preview-prop",
-                                        playerName = "Bukayo Saka",
+                                        playerName = "Sample Forward",
                                         team = "Arsenal",
                                         position = "RW",
                                         marketLabel = "Shots on Target",
-                                        lineLabel = "1+ Shot on Target",
-                                        projectedValue = 1.6,
-                                        overChancePct = 71,
+                                        lineLabel = "Over 1.5 SOT",
+                                        projectedValue = 1.8,
+                                        overChancePct = 62,
                                         rangeLow = 1.0,
                                         rangeHigh = 3.0,
                                         confidenceLabel = "Strong",
-                                        plainReason = "High shot volume at home against open defense.",
+                                        plainReason = "Theme preview card showing prop layout.",
                                     ),
                                     onSave = { statusMsg = "Preview card interactive!" },
                                 )
@@ -286,7 +290,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     }
                 }
 
-                // Undo / Redo / Reset (ED-04)
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedButton(onClick = { app.prefsRepo.undoTheme() }, enabled = canUndo, shape = tokens.shapes.button, modifier = Modifier.weight(1f)) {
@@ -301,7 +304,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     }
                 }
 
-                // 6 Curated Presets
                 item {
                     SectionCard {
                         Text("Curated Presets", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
@@ -330,7 +332,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     }
                 }
 
-                // Favorite Team Auto-Palettes (CL-07)
                 item {
                     SectionCard {
                         Text("Favorite Team Palettes", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
@@ -344,7 +345,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                     modifier = Modifier.clickable {
                                         app.prefsRepo.updateTheme { cur ->
                                             cur.copy(
-                                                id = "team-${tp.name.lowercase().replace(" ", "-")}",
+                                                id = "team-${tp.name.lowercase(Locale.US).replace(" ", "-")}",
                                                 name = tp.name,
                                                 accentHex = tp.accentHex,
                                                 winHex = tp.winHex,
@@ -369,12 +370,11 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     }
                 }
 
-                // Appearance Mode (Dark, AMOLED, Light, Deuteranopia, Protanopia, Tritanopia) + Dynamic Color + Battery Saver
                 item {
                     SectionCard {
                         Text("Appearance & Color-Blind Modes", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(ThemeMode.entries) { m ->
+                            items(ThemeMode.entries, key = { it.name }) { m ->
                                 TokenPill(m.label, config.mode == m, { app.prefsRepo.updateTheme { it.copy(mode = m, batterySaverAutoAmoled = if (m == ThemeMode.LIGHT) false else it.batterySaverAutoAmoled) } })
                             }
                         }
@@ -390,14 +390,13 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("Battery Saver → Auto AMOLED", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13.5f))
-                                Text("Automatically switches to pure black & reduced motion on low battery.", color = c.textMuted, fontSize = scaledSp(12f))
+                                Text("Automatically switches to pure black on low battery.", color = c.textMuted, fontSize = scaledSp(12f))
                             }
                             Switch(checked = config.batterySaverAutoAmoled, onCheckedChange = { v -> app.prefsRepo.updateTheme { it.copy(batterySaverAutoAmoled = v) } })
                         }
                     }
                 }
 
-                // Color Customizer (Simple = 4 roles, Advanced = all 9 semantic betting tokens + HSL/RGB)
                 item {
                     val displayedRoles = if (advancedMode) colorRoles else colorRoles.take(4)
                     val hsl = rgbToHslPublic(activeColorObj)
@@ -409,24 +408,25 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Text(if (advancedMode) "All 9 Semantic Colors" else "Accent & Outcome Colors", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                             StatusBadge(
-                                text = "${String.format("%.1f", activeContrast)}:1",
+                                text = "${String.format(Locale.US, "%.1f", activeContrast)}:1",
                                 color = if (activeContrast >= 4.5f) c.win else c.draw,
                                 containerColor = if (activeContrast >= 4.5f) c.winDim else c.drawDim,
                             )
                         }
 
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(displayedRoles.indices.toList()) { idx ->
+                            items(displayedRoles.indices.toList(), key = { it }) { idx ->
                                 TokenPill(displayedRoles[idx].first, safeRoleIdx == idx, { activeColorRole = idx })
                             }
                         }
 
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            items(ThemePresets.accentSwatches) { swHex ->
+                            items(ThemePresets.accentSwatches, key = { it }) { swHex ->
                                 val selected = activeHex.equals(swHex, ignoreCase = true)
                                 Box(
                                     modifier = Modifier
-                                        .size(34.dp)
+                                        .size(38.dp)
+                                        .semantics { contentDescription = "Color swatch $swHex" }
                                         .clip(CircleShape)
                                         .background(parseHexColor(swHex))
                                         .border(if (selected) 3.dp else 1.dp, if (selected) c.text else c.border, CircleShape)
@@ -453,7 +453,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             ) { Text("Apply", fontWeight = FontWeight.Bold) }
                         }
 
-                        // HSL Hue + Saturation + Lightness sliders (ED-05)
                         ChannelSlider("Hue", hsl[0], 0f..360f, c.accent) { nh ->
                             updateActiveRoleHex(hslToHexPublic(nh, hsl[1], hsl[2]))
                         }
@@ -492,7 +491,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     }
                 }
 
-                // Surface, Shape, Layout, Gradients & Typography
                 item {
                     SectionCard {
                         Text("Layout, Shape & Typography", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
@@ -506,24 +504,24 @@ fun SettingsScreen(app: EdgeLedgerApp) {
 
                         Text("Card Style", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(SurfaceStyle.entries) { st ->
+                            items(SurfaceStyle.entries, key = { it.name }) { st ->
                                 TokenPill(st.label, config.surfaceStyle == st, { app.prefsRepo.updateTheme { it.copy(surfaceStyle = st) } })
                             }
                         }
 
                         Text("Corner Shape", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(ShapeFamily.entries) { sf ->
+                            items(ShapeFamily.entries, key = { it.name }) { sf ->
                                 TokenPill(sf.label, config.shapeFamily == sf, { app.prefsRepo.updateTheme { it.copy(shapeFamily = sf, cardCornerOverrideDp = null) } })
                             }
                         }
 
                         if (advancedMode) {
-                            val cornerDp = config.cardCornerOverrideDp ?: 16
-                            Text("Custom Card Corner Radius: ${cornerDp}dp", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
+                            Text("Custom Card Corner Radius: ${localCornerDp.roundToInt()}dp", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                             Slider(
-                                value = cornerDp.toFloat(),
-                                onValueChange = { v -> app.prefsRepo.updateTheme { it.copy(cardCornerOverrideDp = v.roundToInt()) } },
+                                value = localCornerDp,
+                                onValueChange = { localCornerDp = it },
+                                onValueChangeFinished = { app.prefsRepo.updateTheme { it.copy(cardCornerOverrideDp = localCornerDp.roundToInt()) } },
                                 valueRange = 0f..28f,
                                 colors = SliderDefaults.colors(thumbColor = c.accent, activeTrackColor = c.accent),
                             )
@@ -531,22 +529,23 @@ fun SettingsScreen(app: EdgeLedgerApp) {
 
                         Text("Font Family", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(FontFamilyPreset.entries) { ff ->
+                            items(FontFamilyPreset.entries, key = { it.name }) { ff ->
                                 TokenPill(ff.label, config.fontFamily == ff, { app.prefsRepo.updateTheme { it.copy(fontFamily = ff) } })
                             }
                         }
 
                         Text("Density", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(DensityPreset.entries) { dp ->
+                            items(DensityPreset.entries, key = { it.name }) { dp ->
                                 TokenPill(dp.label, config.density == dp, { app.prefsRepo.updateTheme { it.copy(density = dp) } })
                             }
                         }
 
-                        Text("Global Text Scale: ${(config.fontScale * 100).roundToInt()}%", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
+                        Text("Global Text Scale: ${(localFontScale * 100).roundToInt()}%", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         Slider(
-                            value = config.fontScale,
-                            onValueChange = { v -> app.prefsRepo.updateTheme { it.copy(fontScale = (v * 20).roundToInt() / 20f) } },
+                            value = localFontScale,
+                            onValueChange = { localFontScale = (it * 20).roundToInt() / 20f },
+                            onValueChangeFinished = { app.prefsRepo.updateTheme { it.copy(fontScale = localFontScale) } },
                             valueRange = 0.85f..1.35f,
                             colors = SliderDefaults.colors(thumbColor = c.accent, activeTrackColor = c.accent),
                         )
@@ -562,7 +561,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
 
                         Text("Motion Speed", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(MotionSpeed.entries) { ms ->
+                            items(MotionSpeed.entries, key = { it.name }) { ms ->
                                 TokenPill(ms.label, config.motionSpeed == ms, { app.prefsRepo.updateTheme { it.copy(motionSpeed = ms) } })
                             }
                         }
@@ -576,7 +575,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     }
                 }
 
-                // Saved Custom Themes + Export/Import JSON (ED-07, SG-01, SG-02)
                 item {
                     SectionCard {
                         Text("Saved Custom Themes (${savedThemes.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
@@ -662,13 +660,12 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                 }
             }
 
-            // ================= 1: API KEYS & QUOTA MONITOR =================
             1 -> {
                 item {
                     SectionCard {
                         Text("Optional Free API Keys", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15.5f))
                         Text(
-                            "EdgeLedger already runs 100% free with zero keys. Add any personal free keys below to unlock live cross-bookmaker odds, Football-Data.org fixtures, and CricketData matches.",
+                            "EdgeLedger runs 100% free with zero keys. Add any personal free keys below (encrypted with Android Keystore AES-GCM) to unlock live cross-bookmaker odds, Football-Data.org fixtures, and CricketData matches.",
                             color = c.textMuted,
                             fontSize = scaledSp(12f),
                         )
@@ -681,14 +678,14 @@ fun SettingsScreen(app: EdgeLedgerApp) {
 
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("Polymarket Public Odds (Keyless)", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f))
+                                Text("Polymarket Sports Odds (Keyless)", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f))
                                 Text("Free prediction-market consensus probabilities", color = c.textMuted, fontSize = scaledSp(11.5f))
                             }
                             Switch(checked = apiKeys.enablePolymarket, onCheckedChange = { v -> app.prefsRepo.updateApiKeys { it.copy(enablePolymarket = v) } })
                         }
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("Kalshi Public Market Data (Keyless)", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f))
+                                Text("Kalshi Sports Market Data (Keyless)", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f))
                                 Text("Free public exchange probabilities", color = c.textMuted, fontSize = scaledSp(11.5f))
                             }
                             Switch(checked = apiKeys.enableKalshi, onCheckedChange = { v -> app.prefsRepo.updateApiKeys { it.copy(enableKalshi = v) } })
@@ -707,7 +704,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                         )
                                     }
                                     app.syncRepo.refreshQuotaSummary()
-                                    statusMsg = "API keys saved securely on your device."
+                                    statusMsg = "API keys encrypted & saved on your device."
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
                                 shape = tokens.shapes.button,
@@ -757,19 +754,32 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                 }
             }
 
-            // ================= 2: MODEL, DEVIGGING, STAKING & ODDS =================
             2 -> {
                 item {
                     SectionCard {
                         Text("Bankroll & Staking Engine", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value = balanceInput, onValueChange = { balanceInput = it }, label = { Text("Real Balance ($)") }, singleLine = true, modifier = Modifier.weight(1f))
-                            OutlinedTextField(value = paperInput, onValueChange = { paperInput = it }, label = { Text("Paper Balance ($)") }, singleLine = true, modifier = Modifier.weight(1f))
+                            OutlinedTextField(
+                                value = balanceInput,
+                                onValueChange = { balanceInput = it },
+                                label = { Text("Real Balance ($)") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = paperInput,
+                                onValueChange = { paperInput = it },
+                                label = { Text("Paper Balance ($)") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
                         }
                         Button(
                             onClick = {
-                                val rb = balanceInput.toDoubleOrNull()?.takeIf { it >= 50.0 } ?: prefs.bankroll
-                                val pb = paperInput.toDoubleOrNull()?.takeIf { it >= 50.0 } ?: prefs.paperBankroll
+                                val rb = balanceInput.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 50.0 } ?: prefs.bankroll
+                                val pb = paperInput.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 50.0 } ?: prefs.paperBankroll
                                 app.prefsRepo.updatePrefs { it.copy(bankroll = rb, paperBankroll = pb) }
                                 statusMsg = "Updated Real ($${rb.toInt()}) & Paper ($${pb.toInt()}) balances."
                             },
@@ -780,7 +790,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
 
                         Text("Staking Strategy", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(StakingMode.entries) { sm ->
+                            items(StakingMode.entries, key = { it.name }) { sm ->
                                 TokenPill(sm.label, prefs.stakingMode == sm, { app.prefsRepo.updatePrefs { it.copy(stakingMode = sm) } })
                             }
                         }
@@ -794,7 +804,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
 
                         Text("Odds Display Format", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(OddsDisplayFormat.entries) { fmt ->
+                            items(OddsDisplayFormat.entries, key = { it.name }) { fmt ->
                                 TokenPill(fmt.label, prefs.oddsFormat == fmt, { app.prefsRepo.updatePrefs { it.copy(oddsFormat = fmt) } })
                             }
                         }
@@ -806,23 +816,25 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         Text("Fair Odds & Value Filters", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         Text("Vig-Removal Method (Fair Market Probability)", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(DevigMethod.entries) { dm ->
+                            items(DevigMethod.entries, key = { it.name }) { dm ->
                                 TokenPill(dm.label, prefs.devigMethod == dm, { app.prefsRepo.updatePrefs { it.copy(devigMethod = dm) } })
                             }
                         }
 
-                        Text("Minimum Value Edge to Flag: +${String.format("%.1f", prefs.minEvPct)}%", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
+                        Text("Minimum Value Edge to Flag: +${String.format(Locale.US, "%.1f", localMinEv)}%", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         Slider(
-                            value = prefs.minEvPct.toFloat(),
-                            onValueChange = { v -> app.prefsRepo.updatePrefs { it.copy(minEvPct = (v * 2).roundToInt() / 2.0) } },
+                            value = localMinEv,
+                            onValueChange = { localMinEv = (it * 2).roundToInt() / 2f },
+                            onValueChangeFinished = { app.prefsRepo.updatePrefs { it.copy(minEvPct = localMinEv.toDouble()) } },
                             valueRange = 0.5f..8.0f,
                             colors = SliderDefaults.colors(thumbColor = c.accent, activeTrackColor = c.accent),
                         )
 
-                        Text("Minimum Win Probability Floor: ${prefs.minProbFloorPct}%", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
+                        Text("Minimum Win Probability Floor: ${localMinProb.roundToInt()}%", color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)
                         Slider(
-                            value = prefs.minProbFloorPct.toFloat(),
-                            onValueChange = { v -> app.prefsRepo.updatePrefs { it.copy(minProbFloorPct = v.roundToInt()) } },
+                            value = localMinProb,
+                            onValueChange = { localMinProb = it },
+                            onValueChangeFinished = { app.prefsRepo.updatePrefs { it.copy(minProbFloorPct = localMinProb.roundToInt()) } },
                             valueRange = 10f..45f,
                             colors = SliderDefaults.colors(thumbColor = c.accent, activeTrackColor = c.accent),
                         )
@@ -845,28 +857,35 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                 }
             }
 
-            // ================= 3: ALERTS, QUIET HOURS & DATA CREDITS =================
             else -> {
                 item {
                     SectionCard {
                         Text("Value Alerts & Quiet Hours", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("Local Value & Steam Alerts", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13.5f))
-                                Text("Flags games exceeding +${String.format("%.1f", prefs.minEvPct)}% value edge or >=3% steam moves.", color = c.textMuted, fontSize = scaledSp(12f))
+                                Text("Local Value & Steam Flags", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13.5f))
+                                Text("Highlights games exceeding +${String.format(Locale.US, "%.1f", prefs.minEvPct)}% value edge or >=3% steam moves.", color = c.textMuted, fontSize = scaledSp(12f))
                             }
                             Switch(checked = prefs.alertsEnabled, onCheckedChange = { v -> app.prefsRepo.updatePrefs { it.copy(alertsEnabled = v) } })
                         }
-                        Text("Quiet Hours: %02d:00 – %02d:00 (30 min cooldown)".format(prefs.quietHoursStart, prefs.quietHoursEnd), color = c.textSecondary, fontSize = scaledSp(12f), fontWeight = FontWeight.SemiBold)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursStart = (it.quietHoursStart + 23) % 24) } }, shape = tokens.shapes.button, modifier = Modifier.weight(1f)) {
-                                Text("Start -1h", fontSize = scaledSp(11.5f))
+                        Text(
+                            String.format(Locale.US, "Quiet Hours: %02d:00 – %02d:00 (30 min cooldown)", prefs.quietHoursStart, prefs.quietHoursEnd),
+                            color = c.textSecondary,
+                            fontSize = scaledSp(12f),
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursStart = (it.quietHoursStart + 23) % 24) } }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp), modifier = Modifier.weight(1f)) {
+                                Text("Start -1h", fontSize = scaledSp(11f))
                             }
-                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursStart = (it.quietHoursStart + 1) % 24) } }, shape = tokens.shapes.button, modifier = Modifier.weight(1f)) {
-                                Text("Start +1h", fontSize = scaledSp(11.5f))
+                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursStart = (it.quietHoursStart + 1) % 24) } }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp), modifier = Modifier.weight(1f)) {
+                                Text("Start +1h", fontSize = scaledSp(11f))
                             }
-                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursEnd = (it.quietHoursEnd + 1) % 24) } }, shape = tokens.shapes.button, modifier = Modifier.weight(1f)) {
-                                Text("End +1h", fontSize = scaledSp(11.5f))
+                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursEnd = (it.quietHoursEnd + 23) % 24) } }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp), modifier = Modifier.weight(1f)) {
+                                Text("End -1h", fontSize = scaledSp(11f))
+                            }
+                            OutlinedButton(onClick = { app.prefsRepo.updatePrefs { it.copy(quietHoursEnd = (it.quietHoursEnd + 1) % 24) } }, shape = tokens.shapes.button, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp), modifier = Modifier.weight(1f)) {
+                                Text("End +1h", fontSize = scaledSp(11f))
                             }
                         }
                     }
@@ -883,13 +902,18 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             "Open-Meteo (CC BY 4.0) — Free stadium kickoff weather forecasts",
                             "Official NHL Web API & MLB Stats API — Public schedules & game feeds",
                             "TennisMyLife ATP Database — Free historical ATP match & serve statistics",
-                            "Polymarket & Kalshi — Public read-only prediction market probabilities",
+                            "Polymarket & Kalshi — Public read-only sports prediction market probabilities",
                             "The Odds API, OddsPapi, CricketData.org & API-Sports — Optional personal free-tier keys",
                         )
                         credits.forEach { line ->
                             Text("• $line", color = c.textSecondary, fontSize = scaledSp(12f))
                         }
-                        Text("EdgeLedger v7.1.0 · 100% On-Device & Local-Only Privacy", color = c.textMuted, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "EdgeLedger v${BuildConfig.VERSION_NAME} · 100% On-Device & Local-Only Privacy",
+                            color = c.textMuted,
+                            fontSize = scaledSp(11.5f),
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
                 }
             }
@@ -905,14 +929,16 @@ private fun ChannelSlider(
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     trackColor: Color,
-    onValueChange: (Float) -> Unit,
+    onValueCommit: (Float) -> Unit,
 ) {
     val c = AppTheme.tokens.colors
+    var localValue by remember(value) { mutableFloatStateOf(value.coerceIn(range.start, range.endInclusive)) }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("$label ${value.roundToInt()}", color = c.textSecondary, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(0.28f))
+        Text("$label ${localValue.roundToInt()}", color = c.textSecondary, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(0.28f))
         Slider(
-            value = value.coerceIn(range.start, range.endInclusive),
-            onValueChange = onValueChange,
+            value = localValue,
+            onValueChange = { localValue = it },
+            onValueChangeFinished = { onValueCommit(localValue) },
             valueRange = range,
             colors = SliderDefaults.colors(thumbColor = trackColor, activeTrackColor = trackColor),
             modifier = Modifier.weight(0.72f),

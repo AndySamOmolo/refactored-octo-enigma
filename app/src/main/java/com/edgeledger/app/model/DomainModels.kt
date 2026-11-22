@@ -1,8 +1,6 @@
 package com.edgeledger.app.model
 
-import com.edgeledger.app.engine.FeatureDriver
-import com.edgeledger.app.engine.LineMovePoint
-import com.edgeledger.app.engine.PlayerPropPrediction
+import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -41,6 +39,58 @@ enum class ConfidenceLevel(val label: String) {
 }
 
 @Serializable
+enum class DevigMethod(val label: String) {
+    SHIN("Shin (Sharp)"),
+    MULTIPLICATIVE("Multiplicative"),
+    POWER("Power"),
+    ADDITIVE("Additive"),
+    ODDS_RATIO("Odds-Ratio"),
+}
+
+@Serializable
+enum class StakingMode(val label: String) {
+    FRACTIONAL_KELLY("Smart Kelly"),
+    FLAT("Flat Stake"),
+    PERCENT_BANKROLL("% of Balance"),
+}
+
+@Immutable
+@Serializable
+data class PlayerPropPrediction(
+    val id: String,
+    val playerName: String,
+    val team: String,
+    val position: String,
+    val marketLabel: String,
+    val lineLabel: String,
+    val projectedValue: Double,
+    val overChancePct: Int,
+    val rangeLow: Double,
+    val rangeHigh: Double,
+    val confidenceLabel: String,
+    val plainReason: String,
+)
+
+@Immutable
+@Serializable
+data class FeatureDriver(
+    val label: String,
+    val impactPct: Double,
+    val isPositive: Boolean,
+    val detail: String,
+)
+
+@Immutable
+@Serializable
+data class LineMovePoint(
+    val timeLabel: String,
+    val sharpHomeProbPct: Float,
+    val retailHomeProbPct: Float,
+    val isSteamMove: Boolean = false,
+)
+
+@Immutable
+@Serializable
 data class HistoricalMatch(
     val id: String,
     val sport: Sport,
@@ -54,7 +104,6 @@ data class HistoricalMatch(
     val oddsHome: Double? = null,
     val oddsDraw: Double? = null,
     val oddsAway: Double? = null,
-    // Football-Data.co.uk extra columns
     val homeHtGoals: Int? = null,
     val awayHtGoals: Int? = null,
     val homeShots: Int? = null,
@@ -69,12 +118,10 @@ data class HistoricalMatch(
     val awayYellows: Int? = null,
     val homeReds: Int? = null,
     val awayReds: Int? = null,
-    // nflverse extra columns
     val spreadLine: Double? = null,
     val totalLine: Double? = null,
     val homeRestDays: Int? = null,
     val awayRestDays: Int? = null,
-    // TennisMyLife extra columns
     val homeAces: Int? = null,
     val awayAces: Int? = null,
     val homeDoubleFaults: Int? = null,
@@ -83,6 +130,7 @@ data class HistoricalMatch(
     val awayFirstServeWonPct: Double? = null,
 )
 
+@Immutable
 @Serializable
 data class TeamProfile(
     val team: String,
@@ -101,7 +149,6 @@ data class TeamProfile(
     val avgScored: Double = 1.4,
     val avgConceded: Double = 1.3,
     val recentForm: List<String> = emptyList(),
-    // Rich Football stats
     val shotsPerGame: Double = 12.5,
     val shotsOnTargetPerGame: Double = 4.5,
     val cornersPerGame: Double = 5.2,
@@ -112,11 +159,9 @@ data class TeamProfile(
     val cleanSheetPct: Double = 30.0,
     val bttsPct: Double = 52.0,
     val over25Pct: Double = 54.0,
-    // Rich NFL stats
     val atsCoverPct: Double = 50.0,
     val overTotalPct: Double = 50.0,
     val avgRestDays: Double = 7.0,
-    // Rich Tennis stats
     val hardWinPct: Double = 55.0,
     val clayWinPct: Double = 55.0,
     val grassWinPct: Double = 55.0,
@@ -126,6 +171,7 @@ data class TeamProfile(
     val logoUrl: String? = null,
 )
 
+@Immutable
 @Serializable
 data class BookmakerOddsLine(
     val bookmaker: String,
@@ -136,6 +182,7 @@ data class BookmakerOddsLine(
     val updatedLabel: String = "Synced",
 )
 
+@Immutable
 @Serializable
 data class StadiumWeather(
     val stadium: String,
@@ -145,6 +192,7 @@ data class StadiumWeather(
     val summary: String,
 )
 
+@Immutable
 @Serializable
 data class MarketPickItem(
     val id: String,
@@ -155,12 +203,14 @@ data class MarketPickItem(
     val plainReason: String,
 )
 
+@Immutable
 @Serializable
 data class ExactScorelineItem(
     val score: String,
     val chancePct: Int,
 )
 
+@Immutable
 @Serializable
 data class FullMatchMarkets(
     val projectedHome: Double,
@@ -168,8 +218,7 @@ data class FullMatchMarkets(
     val probHome: Double,
     val probDraw: Double,
     val probAway: Double,
-    val modelVersion: String = "v6.0.0",
-    // Football rich markets
+    val modelVersion: String = "v8.0.0",
     val doubleChanceHomeOrDrawPct: Int = 0,
     val doubleChanceAwayOrDrawPct: Int = 0,
     val drawNoBetHomePct: Int = 0,
@@ -202,7 +251,6 @@ data class FullMatchMarkets(
     val projectedShotsTotal: Double = 0.0,
     val projectedSotTotal: Double = 0.0,
     val topScorelines: List<ExactScorelineItem> = emptyList(),
-    // US Team Sports rich markets
     val projectedScoreDisplay: String = "",
     val projectedSpreadDisplay: String = "",
     val altSpreadLabel: String = "",
@@ -214,7 +262,6 @@ data class FullMatchMarkets(
     val closeGameLabel: String = "",
     val closeGamePct: Int = 0,
     val overtimeChancePct: Int = 0,
-    // Tennis rich markets
     val firstSetHomePct: Int = 0,
     val straightSetsPct: Int = 0,
     val goesToThreeSetsPct: Int = 0,
@@ -226,10 +273,10 @@ data class FullMatchMarkets(
     val projectedTotalGames: Double = 0.0,
     val totalGamesLine: Double = 22.5,
     val totalGamesOverPct: Int = 0,
-    // Top ranked picks across all markets
     val topPicks: List<MarketPickItem> = emptyList(),
 )
 
+@Immutable
 @Serializable
 data class HeadToHeadGame(
     val dateIso: String,
@@ -239,6 +286,7 @@ data class HeadToHeadGame(
     val awayScore: Int,
 )
 
+@Immutable
 @Serializable
 data class MatchFixture(
     val id: String,
@@ -267,6 +315,7 @@ data class MatchFixture(
     val awayLogoUrl: String? = null,
 )
 
+@Immutable
 @Serializable
 data class ReliabilityBin(
     val rangeLabel: String,
@@ -274,30 +323,33 @@ data class ReliabilityBin(
     val count: Int,
 )
 
+@Immutable
 @Serializable
 data class LeagueTrackRecord(
     val sport: Sport,
     val leagueId: String,
     val leagueName: String,
     val gamesTested: Int,
-    val accuracyScore: Int, // 0..100 plain-English score
+    val accuracyScore: Int,
     val beatsSimpleGuess: Boolean,
     val simulatedProfitPct: Double,
     val hasGradedOdds: Boolean = true,
     val reliabilityBins: List<ReliabilityBin>,
 )
 
+@Immutable
 @Serializable
 data class ProviderHealth(
     val id: String,
     val name: String,
     val sport: Sport,
-    val status: String, // "LIVE", "OFFLINE", "CIRCUIT_OPEN"
+    val status: String, // "LIVE", "DEGRADED", "OFFLINE", "CIRCUIT_OPEN", "OFF-SEASON"
     val recordsLoaded: Int,
     val lastUpdatedIso: String,
     val note: String,
 )
 
+@Immutable
 @Serializable
 data class PredictionMarketQuote(
     val source: String, // "Polymarket" or "Kalshi"
@@ -306,6 +358,7 @@ data class PredictionMarketQuote(
     val noProbPct: Int,
 )
 
+@Immutable
 @Serializable
 data class LivePlayerEntry(
     val name: String,

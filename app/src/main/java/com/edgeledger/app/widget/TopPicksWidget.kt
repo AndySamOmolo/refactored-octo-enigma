@@ -7,6 +7,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
+import androidx.glance.action.actionStartActivity
+import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.provideContent
@@ -20,20 +22,28 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import androidx.glance.unit.ColorProvider
+import com.edgeledger.app.MainActivity
 import com.edgeledger.app.data.AppDatabase
-import com.edgeledger.app.data.AppModelSnapshot
-import kotlinx.serialization.json.Json
+import com.edgeledger.app.data.SyncRepository
+import com.edgeledger.app.ui.components.shortTeamName
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class TopPicksWidget : GlanceAppWidget() {
-    private val json = Json { ignoreUnknownKeys = true }
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val snapEntity = runCatching { AppDatabase.getInstance(context).dao().getSnapshot() }.getOrNull()
-        val snap = snapEntity?.let { runCatching { json.decodeFromString<AppModelSnapshot>(it.payloadJson) }.getOrNull() }
+        val snap = withContext(Dispatchers.IO) {
+            runCatching {
+                SyncRepository.readSnapshotFromDisk(context, AppDatabase.getInstance(context))
+            }.getOrNull()
+        }
         val topRows = snap?.fixtures?.take(3)?.map { fx ->
             val pick = fx.markets.topPicks.firstOrNull()
-            "${fx.homeTeam.substringBefore(" ")} vs ${fx.awayTeam.substringBefore(" ")} · ${pick?.label ?: "Open App"} (${pick?.chancePct ?: 50}%)"
-        } ?: listOf("Open EdgeLedger to load today's top picks")
+            val home = shortTeamName(fx.homeTeam)
+            val away = shortTeamName(fx.awayTeam)
+            "$home vs $away · ${pick?.label ?: "View Match"} (${pick?.chancePct ?: 50}%)"
+        }?.takeIf { it.isNotEmpty() }
+            ?: listOf("Tap to open EdgeLedger & sync live picks")
 
         provideContent {
             WidgetContent(topRows)
@@ -46,6 +56,7 @@ class TopPicksWidget : GlanceAppWidget() {
             modifier = GlanceModifier
                 .fillMaxSize()
                 .background(Color(0xFF0A0E17))
+                .clickable(actionStartActivity<MainActivity>())
                 .padding(12.dp),
         ) {
             Text(
@@ -60,6 +71,7 @@ class TopPicksWidget : GlanceAppWidget() {
             rows.forEach { line ->
                 Text(
                     text = "• $line",
+                    maxLines = 2,
                     style = TextStyle(
                         color = ColorProvider(Color(0xFFF8FAFC)),
                         fontSize = 12.sp,

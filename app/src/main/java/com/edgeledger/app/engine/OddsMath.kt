@@ -1,51 +1,142 @@
 package com.edgeledger.app.engine
 
 import com.edgeledger.app.model.OddsDisplayFormat
-import kotlinx.serialization.Serializable
 import java.security.MessageDigest
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.floor
+import kotlin.math.ln
+import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
-/**
- * Supported market de-vigging (vig-removal) algorithms (PR-07).
- */
-@Serializable
-enum class DevigMethod(val label: String) {
-    SHIN("Shin (Sharp)"),
-    MULTIPLICATIVE("Multiplicative"),
-    POWER("Power"),
-    ADDITIVE("Additive"),
-    ODDS_RATIO("Odds-Ratio")
-}
+// Backwards-compatible typealiases preserving existing imports from com.edgeledger.app.engine
+typealias DevigMethod = com.edgeledger.app.model.DevigMethod
+typealias StakingMode = com.edgeledger.app.model.StakingMode
 
 /**
- * Bankroll staking strategies for bet sizing (TR-04).
+ * Shared statistical helper functions used across PredictionEngine, OddsMath, and PlayerPropsEngine.
  */
-@Serializable
-enum class StakingMode(val label: String) {
-    FRACTIONAL_KELLY("Smart Kelly"),
-    FLAT("Flat Stake"),
-    PERCENT_BANKROLL("% of Balance")
+object StatsMath {
+    /** Abramowitz & Stegun 7.1.26 approximation of erf(x) (max error < 1.5e-7). */
+    fun erf(x: Double): Double {
+        if (!x.isFinite()) return if (x > 0) 1.0 else -1.0
+        val sign = if (x < 0.0) -1.0 else 1.0
+        val ax = abs(x)
+        val t = 1.0 / (1.0 + 0.3275911 * ax)
+        val poly = (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t)
+        return sign * (1.0 - poly * exp(-ax * ax))
+    }
+
+    fun normalCdf(z: Double): Double {
+        if (!z.isFinite()) return if (z > 0) 1.0 else 0.0
+        return 0.5 * (1.0 + erf(z / sqrt(2.0)))
+    }
+
+    fun normalCdf(x: Double, mean: Double, sd: Double): Double {
+        if (!x.isFinite() || !mean.isFinite() || !sd.isFinite()) return 0.5
+        return normalCdf((x - mean) / max(0.01, sd))
+    }
+
+    /** Acklam rational approximation of the inverse standard normal CDF. */
+    fun normalInvCdf(p: Double): Double {
+        val x = if (p.isFinite()) p.coerceIn(1e-6, 1.0 - 1e-6) else 0.5
+        val a = doubleArrayOf(
+            -3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+            1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00,
+        )
+        val b = doubleArrayOf(
+            -5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+            6.680131188771972e+01, -1.328068155288572e+01,
+        )
+        val c = doubleArrayOf(
+            -7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+            -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00,
+        )
+        val d = doubleArrayOf(
+            7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+            3.754408661907416e+00,
+        )
+        val pLow = 0.02425
+        val pHigh = 1.0 - pLow
+        return when {
+            x < pLow -> {
+                val q = sqrt(-2.0 * ln(x))
+                (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+                    ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+            }
+            x <= pHigh -> {
+                val q = x - 0.5
+                val r = q * q
+                (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+                    (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+            }
+            else -> {
+                val q = sqrt(-2.0 * ln(1.0 - x))
+                -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+                    ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+            }
+        }
+    }
+
+    /** Exact log-factorial via log-gamma summation (safe for any non-negative k). */
+    fun logFactorial(k: Int): Double {
+        if (k <= 1) return 0.0
+        var sum = 0.0
+        for (i in 2..k) sum += ln(i.toDouble())
+        return sum
+    }
+
+    /** Numerically stable Poisson PMF in log space (never clamps at 8!). */
+    fun poissonPmf(k: Int, lambda: Double): Double {
+        if (k < 0 || !lambda.isFinite()) return 0.0
+        val safeL = max(1e-6, lambda)
+        return exp(k * ln(safeL) - safeL - logFactorial(k))
+    }
+
+    /** Exact P(X > line) = 1 - P(X <= floor(line)) using iterative recurrence without factorial overflow. */
+    fun poissonOverProb(mean: Double, line: Double): Double {
+        if (!mean.isFinite() || !line.isFinite()) return 0.5
+        val safeL = max(0.01, mean)
+        val maxU = floor(line).toInt()
+        if (maxU < 0) return 0.99
+        var term = exp(-safeL)
+        var under = term
+        for (k in 1..maxU) {
+            term *= safeL / k.toDouble()
+            under += term
+            if (term < 1e-15 && k > safeL) break
+        }
+        return (1.0 - under).coerceIn(0.01, 0.99)
+    }
+
+    /** Exact Poisson quantile: smallest k >= 0 with P(X <= k) >= q. */
+    fun poissonQuantile(mean: Double, q: Double): Int {
+        if (!mean.isFinite() || mean <= 0.0) return 0
+        val target = q.coerceIn(0.001, 0.999)
+        var term = exp(-mean)
+        var cdf = term
+        var k = 0
+        while (cdf < target && k < 500) {
+            k++
+            term *= mean / k.toDouble()
+            cdf += term
+        }
+        return k
+    }
 }
 
-/**
- * Fair market probabilities and bookmaker margin metrics derived from decimal odds.
- */
 data class DevigResult(
     val fairHome: Double,
     val fairDraw: Double,
     val fairAway: Double,
     val overround: Double,
-    val holdPct: Double
+    val holdPct: Double,
 )
 
-/**
- * Expected value, market edge, and stake sizing evaluation for a single match outcome.
- */
 data class SideValueEval(
     val label: String,
     val modelProb: Double,
@@ -54,57 +145,35 @@ data class SideValueEval(
     val expectedValue: Double,
     val edgePctPoints: Double,
     val suggestedStakeFraction: Double,
-    val isGoodValue: Boolean
+    val isGoodValue: Boolean,
 )
 
-/**
- * Multi-leg parlay payout, combined win chance, estimated vig, and correlation warning.
- */
 data class ParlayResult(
     val combinedOdds: Double,
     val combinedChancePct: Int,
     val potentialPayout: Double,
     val potentialProfit: Double,
     val estimatedVigPct: Double,
-    val correlationWarning: String?
+    val correlationWarning: String?,
 )
 
-/**
- * Two-way arbitrage detection and equalized-payout stake split (EN-05).
- */
 data class ArbitrageResult(
     val isArbitrage: Boolean,
     val profitPct: Double,
     val stakeA: Double,
     val stakeB: Double,
     val guaranteedPayout: Double,
-    val guaranteedProfit: Double
+    val guaranteedProfit: Double,
 )
 
-/**
- * Statistical significance summary comparing realized win rate against random chance (TR-01).
- */
 data class SignificanceResult(
     val zScore: Double,
     val pValue: Double,
     val beatsRandomChance: Boolean,
-    val plainLabel: String
+    val plainLabel: String,
 )
 
-/**
- * Core odds conversion, de-vigging, staking, parlay, arbitrage, CLV, and significance math.
- */
 object OddsMath {
-
-    fun expectedValue(modelProb: Double, decimalOdds: Double): Double =
-        (modelProb * decimalOdds) - 1.0
-
-    fun americanToDecimal(american: Double): Double = when {
-        american > 0.0 -> 1.0 + (american / 100.0)
-        american < 0.0 -> 1.0 + (100.0 / (-american))
-        else -> 2.0
-    }
-
 
     private const val EPSILON = 1e-12
     private const val MIN_PROB_FLOOR = 1e-6
@@ -113,40 +182,54 @@ object OddsMath {
     private const val FRACTIONAL_MATCH_TOLERANCE = 0.005
     private val HEX_CHARS = "0123456789abcdef".toCharArray()
 
+    /** Expected value per 1 unit staked: (p * O) - 1. Returns -1.0 on invalid inputs. */
+    fun expectedValue(modelProb: Double, decimalOdds: Double): Double {
+        if (!modelProb.isFinite() || !decimalOdds.isFinite() ||
+            modelProb !in 0.0..1.0 || decimalOdds <= 1.0
+        ) {
+            return -1.0
+        }
+        return (modelProb * decimalOdds) - 1.0
+    }
+
     /**
-     * Removes bookmaker overround (vig) from 2-way or 3-way decimal odds using the selected [method].
+     * Converts valid American odds (|american| >= 100) to decimal odds.
+     * Returns null on NaN, Infinity, 0, or invalid (-100, +100) values.
+     */
+    fun americanToDecimalOrNull(american: Double): Double? {
+        if (!american.isFinite() || abs(american) < 100.0) return null
+        return if (american > 0.0) 1.0 + (american / 100.0) else 1.0 + (100.0 / (-american))
+    }
+
+    /** Backwards-compatible converter returning Double.NaN for invalid American odds. */
+    fun americanToDecimal(american: Double): Double =
+        americanToDecimalOrNull(american) ?: Double.NaN
+
+    /**
+     * Removes bookmaker overround (vig) from 2-way or 3-way decimal odds using [method].
+     * Invalid non-null drawOdds returns a 3-way uniform fallback rather than silently dropping Draw.
      */
     fun deVig(
         homeOdds: Double,
         awayOdds: Double,
         drawOdds: Double? = null,
-        method: DevigMethod = DevigMethod.SHIN
+        method: DevigMethod = DevigMethod.SHIN,
     ): DevigResult {
-        val hasDraw = drawOdds != null && drawOdds.isFinite() && drawOdds > 1.0
-        if (!homeOdds.isFinite() || !awayOdds.isFinite() || homeOdds <= 1.0 || awayOdds <= 1.0) {
-            return if (hasDraw) {
-                DevigResult(
-                    fairHome = 1.0 / 3.0,
-                    fairDraw = 1.0 / 3.0,
-                    fairAway = 1.0 / 3.0,
-                    overround = 1.0,
-                    holdPct = 0.0
-                )
+        val isThreeWay = drawOdds != null
+        val validDraw = drawOdds != null && drawOdds.isFinite() && drawOdds > 1.0
+        val validEnds = homeOdds.isFinite() && awayOdds.isFinite() && homeOdds > 1.0 && awayOdds > 1.0
+        if (!validEnds || (isThreeWay && !validDraw)) {
+            return if (isThreeWay) {
+                DevigResult(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0, 0.0)
             } else {
-                DevigResult(
-                    fairHome = 0.5,
-                    fairDraw = 0.0,
-                    fairAway = 0.5,
-                    overround = 1.0,
-                    holdPct = 0.0
-                )
+                DevigResult(0.5, 0.0, 0.5, 1.0, 0.0)
             }
         }
 
         val qHome = 1.0 / homeOdds
         val qAway = 1.0 / awayOdds
-        val qDraw = if (hasDraw) 1.0 / drawOdds!! else 0.0
-        val rawProbs = if (hasDraw) doubleArrayOf(qHome, qDraw, qAway) else doubleArrayOf(qHome, qAway)
+        val qDraw = if (isThreeWay) 1.0 / drawOdds!! else 0.0
+        val rawProbs = if (isThreeWay) doubleArrayOf(qHome, qDraw, qAway) else doubleArrayOf(qHome, qAway)
 
         val overround = rawProbs.sum()
         val holdPct = if (overround > EPSILON) ((overround - 1.0) / overround) * 100.0 else 0.0
@@ -163,42 +246,24 @@ object OddsMath {
             }
         }
 
-        return if (hasDraw) {
-            DevigResult(
-                fairHome = fairProbs[0],
-                fairDraw = fairProbs[1],
-                fairAway = fairProbs[2],
-                overround = overround,
-                holdPct = holdPct
-            )
+        return if (isThreeWay) {
+            DevigResult(fairProbs[0], fairProbs[1], fairProbs[2], overround, holdPct)
         } else {
-            DevigResult(
-                fairHome = fairProbs[0],
-                fairDraw = 0.0,
-                fairAway = fairProbs[1],
-                overround = overround,
-                holdPct = holdPct
-            )
+            DevigResult(fairProbs[0], 0.0, fairProbs[1], overround, holdPct)
         }
     }
 
-    /**
-     * Backwards-compatible Shin de-vigging entry point delegating to [deVig] with [DevigMethod.SHIN].
-     */
     fun deVigShin(
         homeOdds: Double,
         awayOdds: Double,
-        drawOdds: Double? = null
+        drawOdds: Double? = null,
     ): DevigResult = deVig(homeOdds, awayOdds, drawOdds, DevigMethod.SHIN)
 
-    /**
-     * Computes fractional Kelly bankroll stake fraction, clamped to `[0.0, maxCap]`.
-     */
     fun fractionalKelly(
         modelProb: Double,
         decimalOdds: Double,
         fraction: Double = 0.25,
-        maxCap: Double = 0.05
+        maxCap: Double = 0.05,
     ): Double {
         if (!modelProb.isFinite() || !decimalOdds.isFinite() ||
             !fraction.isFinite() || !maxCap.isFinite() ||
@@ -207,18 +272,13 @@ object OddsMath {
         ) {
             return 0.0
         }
+        val safeCap = maxCap.coerceAtMost(1.0)
         val netOdds = decimalOdds - 1.0
         val fullKelly = (modelProb * decimalOdds - 1.0) / netOdds
         if (fullKelly <= 0.0) return 0.0
-        return (fullKelly * fraction).coerceIn(0.0, maxCap)
+        return (fullKelly * fraction).coerceIn(0.0, safeCap)
     }
 
-    /**
-     * Computes the recommended stake amount in currency units for the selected [StakingMode].
-     *
-     * For [StakingMode.FLAT], pass the base/starting bankroll; for [StakingMode.PERCENT_BANKROLL],
-     * pass the current bankroll balance.
-     */
     fun recommendedStake(
         bankroll: Double,
         modelProb: Double,
@@ -226,31 +286,32 @@ object OddsMath {
         mode: StakingMode,
         kellyFraction: Double = 0.25,
         maxCap: Double = 0.05,
-        flatUnitPct: Double = 0.02
+        flatUnitPct: Double = 0.02,
     ): Double {
-        if (!bankroll.isFinite() || bankroll <= 0.0 || !maxCap.isFinite() || maxCap <= 0.0) {
+        if (!bankroll.isFinite() || bankroll <= 0.0 ||
+            !maxCap.isFinite() || maxCap <= 0.0 ||
+            !modelProb.isFinite() || modelProb !in 0.0..1.0 ||
+            !decimalOdds.isFinite() || decimalOdds <= 1.0
+        ) {
             return 0.0
         }
+        val safeCap = maxCap.coerceAtMost(1.0)
         val stakeFraction = when (mode) {
             StakingMode.FRACTIONAL_KELLY -> fractionalKelly(
                 modelProb = modelProb,
                 decimalOdds = decimalOdds,
                 fraction = kellyFraction,
-                maxCap = maxCap
+                maxCap = safeCap,
             )
             StakingMode.FLAT,
             StakingMode.PERCENT_BANKROLL -> {
-                if (!flatUnitPct.isFinite() || flatUnitPct <= 0.0) 0.0
-                else flatUnitPct.coerceIn(0.0, maxCap)
+                if (!flatUnitPct.isFinite() || flatUnitPct <= 0.0 || expectedValue(modelProb, decimalOdds) <= 0.0) 0.0
+                else flatUnitPct.coerceIn(0.0, safeCap)
             }
         }
         return bankroll * stakeFraction
     }
 
-    /**
-     * Evaluates each available match outcome (Home, optional Draw, Away) for EV, fair-market edge,
-     * and suggested Kelly stake fraction.
-     */
     fun evaluateSides(
         homeLabel: String,
         awayLabel: String,
@@ -264,34 +325,44 @@ object OddsMath {
         maxStakePct: Double = 0.05,
         minEvThreshold: Double = 0.02,
         minProbFloor: Double = 0.20,
-        devigMethod: DevigMethod = DevigMethod.SHIN
+        devigMethod: DevigMethod = DevigMethod.SHIN,
     ): List<SideValueEval> {
+        val safeMinEv = if (minEvThreshold.isFinite()) minEvThreshold else 0.02
+        val safeMinProb = if (minProbFloor.isFinite()) minProbFloor.coerceIn(0.0, 1.0) else 0.20
+        val hasDrawOdds = oddsDraw != null && oddsDraw.isFinite() && oddsDraw > 1.0 && probDraw.isFinite() && probDraw > 0.0
+
         val devig = deVig(
             homeOdds = oddsHome,
             awayOdds = oddsAway,
-            drawOdds = oddsDraw,
-            method = devigMethod
+            drawOdds = if (hasDrawOdds) oddsDraw else null,
+            method = devigMethod,
         )
+
+        // When evaluating a 2-way Draw-No-Bet line on a sport with probDraw > 0, renormalize H/A over (pH + pA)
+        val safeH = if (probHome.isFinite()) probHome.coerceIn(0.0, 1.0) else 0.0
+        val safeA = if (probAway.isFinite()) probAway.coerceIn(0.0, 1.0) else 0.0
+        val safeD = if (probDraw.isFinite()) probDraw.coerceIn(0.0, 1.0) else 0.0
+        val twoWaySum = safeH + safeA
+        val effHomeProb = if (!hasDrawOdds && safeD > 0.0 && twoWaySum > EPSILON) safeH / twoWaySum else safeH
+        val effAwayProb = if (!hasDrawOdds && safeD > 0.0 && twoWaySum > EPSILON) safeA / twoWaySum else safeA
 
         fun evalSide(
             label: String,
             modelProb: Double,
             fairProb: Double,
-            decimalOdds: Double
+            decimalOdds: Double,
         ): SideValueEval {
             val safeProb = if (modelProb.isFinite()) modelProb.coerceIn(0.0, 1.0) else 0.0
             val safeOdds = if (decimalOdds.isFinite() && decimalOdds > 1.0) decimalOdds else 1.0
-            val ev = if (safeOdds > 1.0) safeProb * safeOdds - 1.0 else -1.0
+            val ev = expectedValue(safeProb, safeOdds)
             val edgePctPoints = (safeProb - fairProb) * 100.0
             val stakeFraction = fractionalKelly(
                 modelProb = safeProb,
                 decimalOdds = safeOdds,
                 fraction = kellyFraction,
-                maxCap = maxStakePct
+                maxCap = maxStakePct,
             )
-            val isGoodValue = safeOdds > 1.0 &&
-                ev >= minEvThreshold &&
-                safeProb >= minProbFloor
+            val isGoodValue = safeOdds > 1.0 && ev >= safeMinEv && safeProb >= safeMinProb
 
             return SideValueEval(
                 label = label,
@@ -301,55 +372,51 @@ object OddsMath {
                 expectedValue = ev,
                 edgePctPoints = edgePctPoints,
                 suggestedStakeFraction = stakeFraction,
-                isGoodValue = isGoodValue
+                isGoodValue = isGoodValue,
             )
         }
 
         val results = mutableListOf<SideValueEval>()
-        results += evalSide(homeLabel, probHome, devig.fairHome, oddsHome)
-        if (oddsDraw != null && oddsDraw.isFinite() && oddsDraw > 1.0 && probDraw > 0.0) {
-            results += evalSide("Draw", probDraw, devig.fairDraw, oddsDraw)
+        results += evalSide(homeLabel, effHomeProb, devig.fairHome, oddsHome)
+        if (hasDrawOdds) {
+            results += evalSide("Draw", safeD, devig.fairDraw, oddsDraw!!)
         }
-        results += evalSide(awayLabel, probAway, devig.fairAway, oddsAway)
+        results += evalSide(awayLabel, effAwayProb, devig.fairAway, oddsAway)
         return results
     }
 
-    /**
-     * Formats decimal odds into the requested [OddsDisplayFormat] without unsafe `%` format specifiers.
-     */
+    /** Formats decimal odds safely using Long bounds so extreme odds never saturate Int. */
     fun formatOdds(decimalOdds: Double, format: OddsDisplayFormat): String {
         if (!decimalOdds.isFinite() || decimalOdds <= 1.0) return "--"
+        val bounded = decimalOdds.coerceIn(1.001, 10000.0)
 
         return when (format) {
-            OddsDisplayFormat.DECIMAL -> String.format(Locale.US, "%.2f", decimalOdds)
+            OddsDisplayFormat.DECIMAL -> String.format(Locale.US, "%.2f", bounded)
             OddsDisplayFormat.AMERICAN -> {
-                if (decimalOdds >= 2.0) {
-                    val american = ((decimalOdds - 1.0) * 100.0).roundToInt()
+                if (bounded >= 2.0) {
+                    val american = ((bounded - 1.0) * 100.0).roundToLong()
                     "+$american"
                 } else {
-                    val american = (-100.0 / (decimalOdds - 1.0)).roundToInt()
+                    val american = (-100.0 / (bounded - 1.0)).roundToLong()
                     american.toString()
                 }
             }
-            OddsDisplayFormat.FRACTIONAL -> formatFractionalOdds(decimalOdds - 1.0)
+            OddsDisplayFormat.FRACTIONAL -> formatFractionalOdds(bounded - 1.0)
             OddsDisplayFormat.PERCENT -> {
-                val impliedPct = 100.0 / decimalOdds
-                val formatted = String.format(Locale.US, "%.1f", impliedPct)
-                "$formatted%"
+                val impliedPct = 100.0 / bounded
+                String.format(Locale.US, "%.1f%%", impliedPct)
             }
         }
     }
 
     /**
      * Calculates combined parlay odds, win probability, payout, profit, and estimated vig.
-     *
-     * Each leg pair is `(decimalOdds, winProbability)`. Pairs with `(winProbability, decimalOdds)`
-     * are also handled safely when one value is in `(0, 1]` and the other is `> 1`.
+     * Each leg pair is `(decimalOdds, winProbability)`.
      */
     fun calculateParlay(
         legs: List<Pair<Double, Double>>,
         stake: Double,
-        sameGameWarning: Boolean = false
+        sameGameWarning: Boolean = false,
     ): ParlayResult {
         val warning = if (sameGameWarning) {
             "Same-game picks can be linked, so your true chance of winning may differ from the combined estimate."
@@ -357,32 +424,16 @@ object OddsMath {
             null
         }
 
-        if (legs.isEmpty()) {
-            return ParlayResult(
-                combinedOdds = 1.0,
-                combinedChancePct = 0,
-                potentialPayout = 0.0,
-                potentialProfit = 0.0,
-                estimatedVigPct = 0.0,
-                correlationWarning = warning
-            )
-        }
-
         val safeStake = if (stake.isFinite() && stake > 0.0) stake else 0.0
         var combinedOdds = 1.0
         var combinedProb = 1.0
+        var validLegs = 0
 
-        for ((first, second) in legs) {
-            val (legOdds, legProb) = if (first > 1.0 && second <= 1.0) {
-                first to second
-            } else if (second > 1.0 && first <= 1.0) {
-                second to first
-            } else {
-                first to second
-            }
-
+        for ((legOdds, legProb) in legs) {
             if (!legOdds.isFinite() || legOdds <= 1.0) continue
-            combinedOdds *= legOdds
+            val nextOdds = combinedOdds * legOdds
+            if (!nextOdds.isFinite()) break
+            combinedOdds = nextOdds
 
             val resolvedProb = if (legProb.isFinite() && legProb > 0.0 && legProb <= 1.0) {
                 legProb
@@ -390,12 +441,29 @@ object OddsMath {
                 1.0 / legOdds
             }
             combinedProb *= resolvedProb
+            validLegs++
+        }
+
+        if (validLegs == 0) {
+            return ParlayResult(
+                combinedOdds = 1.0,
+                combinedChancePct = 0,
+                potentialPayout = 0.0,
+                potentialProfit = 0.0,
+                estimatedVigPct = 0.0,
+                correlationWarning = warning,
+            )
         }
 
         val combinedChancePct = (combinedProb * 100.0).roundToInt().coerceIn(0, 100)
-        val potentialPayout = safeStake * combinedOdds
-        val potentialProfit = potentialPayout - safeStake
-        val estimatedVigPct = ((1.0 - combinedProb * combinedOdds).coerceAtLeast(0.0)) * 100.0
+        val potentialPayout = (safeStake * combinedOdds).takeIf { it.isFinite() } ?: 0.0
+        val potentialProfit = (potentialPayout - safeStake).coerceAtLeast(0.0)
+        val fairCombinedOdds = if (combinedProb > EPSILON) 1.0 / combinedProb else combinedOdds
+        val estimatedVigPct = if (fairCombinedOdds > EPSILON && combinedOdds > EPSILON) {
+            ((1.0 - (combinedOdds / fairCombinedOdds)).coerceIn(0.0, 1.0)) * 100.0
+        } else {
+            0.0
+        }
 
         return ParlayResult(
             combinedOdds = combinedOdds,
@@ -403,77 +471,82 @@ object OddsMath {
             potentialPayout = potentialPayout,
             potentialProfit = potentialProfit,
             estimatedVigPct = estimatedVigPct,
-            correlationWarning = warning
+            correlationWarning = warning,
         )
     }
 
-    /**
-     * Detects two-way arbitrage and computes equalized-payout stakes and guaranteed return (EN-05).
-     */
+    /** Detects two-way arbitrage and computes equalized-payout stakes and guaranteed return (EN-05). */
     fun calculateArbitrage(
         oddsA: Double,
         oddsB: Double,
-        totalStake: Double
+        totalStake: Double,
     ): ArbitrageResult {
         if (!oddsA.isFinite() || !oddsB.isFinite() || !totalStake.isFinite() ||
             oddsA <= 1.0 || oddsB <= 1.0 || totalStake <= 0.0
         ) {
-            return ArbitrageResult(
-                isArbitrage = false,
-                profitPct = 0.0,
-                stakeA = 0.0,
-                stakeB = 0.0,
-                guaranteedPayout = 0.0,
-                guaranteedProfit = 0.0
-            )
+            return ArbitrageResult(false, 0.0, 0.0, 0.0, 0.0, 0.0)
         }
 
         val invA = 1.0 / oddsA
         val invB = 1.0 / oddsB
         val invSum = invA + invB
+        val isArbitrage = invSum < 1.0 - EPSILON
+
+        if (!isArbitrage) {
+            return ArbitrageResult(
+                isArbitrage = false,
+                profitPct = ((1.0 / invSum) - 1.0) * 100.0,
+                stakeA = 0.0,
+                stakeB = 0.0,
+                guaranteedPayout = 0.0,
+                guaranteedProfit = 0.0,
+            )
+        }
 
         val stakeA = totalStake * (invA / invSum)
         val stakeB = totalStake * (invB / invSum)
         val guaranteedPayout = totalStake / invSum
         val guaranteedProfit = guaranteedPayout - totalStake
         val profitPct = ((1.0 / invSum) - 1.0) * 100.0
-        val isArbitrage = invSum < 1.0 - EPSILON
 
         return ArbitrageResult(
-            isArbitrage = isArbitrage,
+            isArbitrage = true,
             profitPct = profitPct,
             stakeA = stakeA,
             stakeB = stakeB,
             guaranteedPayout = guaranteedPayout,
-            guaranteedProfit = guaranteedProfit
+            guaranteedProfit = guaranteedProfit,
         )
     }
 
     /**
-     * Evaluates whether a pick record beats random chance using a one-sided binomial z-test (TR-01).
+     * Evaluates whether a pick record beats random chance using exact one-sided binomial p-value
+     * for total <= 100 and Yates continuity-corrected z-test for total > 100.
      */
     fun computeSignificance(
         wins: Int,
         total: Int,
-        expectedWinRate: Double = 0.50
+        expectedWinRate: Double = 0.50,
     ): SignificanceResult {
         if (total <= 0 || wins < 0 || wins > total ||
             !expectedWinRate.isFinite() || expectedWinRate <= 0.0 || expectedWinRate >= 1.0
         ) {
-            return SignificanceResult(
-                zScore = 0.0,
-                pValue = 1.0,
-                beatsRandomChance = false,
-                plainLabel = "Not enough settled picks yet"
-            )
+            return SignificanceResult(0.0, 1.0, false, "Not enough settled picks yet")
         }
 
-        val observed = wins.toDouble() / total.toDouble()
-        val stdError = sqrt(expectedWinRate * (1.0 - expectedWinRate) / total.toDouble())
+        val n = total.toDouble()
+        val observed = wins.toDouble() / n
+        val stdError = sqrt(expectedWinRate * (1.0 - expectedWinRate) / n)
         val zScore = if (stdError > EPSILON) (observed - expectedWinRate) / stdError else 0.0
-        val pValue = (1.0 - normalCdf(zScore)).coerceIn(0.0, 1.0)
-        val beatsRandomChance = total >= 10 && zScore > 0.0 && pValue < 0.05
 
+        val pValue = if (total <= 100) {
+            exactBinomialUpperTail(wins, total, expectedWinRate)
+        } else {
+            val continuityAdjusted = ((wins - 0.5) / n - expectedWinRate) / max(EPSILON, stdError)
+            (1.0 - StatsMath.normalCdf(continuityAdjusted)).coerceIn(0.0, 1.0)
+        }
+
+        val beatsRandomChance = total >= 10 && zScore > 0.0 && pValue < 0.05
         val plainLabel = when {
             total < 10 -> "Small sample — keep tracking picks"
             zScore > 0.0 && pValue < 0.01 -> "Strong edge"
@@ -483,18 +556,21 @@ object OddsMath {
             else -> "Below avg"
         }
 
-        return SignificanceResult(
-            zScore = zScore,
-            pValue = pValue,
-            beatsRandomChance = beatsRandomChance,
-            plainLabel = plainLabel
-        )
+        return SignificanceResult(zScore, pValue, beatsRandomChance, plainLabel)
     }
 
-    /**
-     * Computes Closing Line Value (CLV) percentage from taken vs. closing decimal odds.
-     * Positive values indicate beating the closing line.
-     */
+    private fun exactBinomialUpperTail(kMin: Int, n: Int, p: Double): Double {
+        val logN = StatsMath.logFactorial(n)
+        val logP = ln(p)
+        val logQ = ln(1.0 - p)
+        var sum = 0.0
+        for (k in kMin..n) {
+            val logC = logN - StatsMath.logFactorial(k) - StatsMath.logFactorial(n - k)
+            sum += exp(logC + k * logP + (n - k) * logQ)
+        }
+        return sum.coerceIn(0.0, 1.0)
+    }
+
     fun computeClvPct(takenOdds: Double, closingOdds: Double): Double {
         if (!takenOdds.isFinite() || !closingOdds.isFinite() ||
             takenOdds <= 1.0 || closingOdds <= 1.0
@@ -504,9 +580,6 @@ object OddsMath {
         return ((takenOdds / closingOdds) - 1.0) * 100.0
     }
 
-    /**
-     * Returns the lowercase 64-character SHA-256 hex digest of [input] encoded as UTF-8.
-     */
     fun sha256Hex(input: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(input.toByteArray(Charsets.UTF_8))
@@ -518,6 +591,16 @@ object OddsMath {
         }
         return String(chars)
     }
+
+    /** Canonical pre-kickoff SHA-256 hash binding fixture, matchup, pick, probability, model version, and timestamp. */
+    fun buildLockedPickHash(
+        fixtureId: String,
+        matchup: String,
+        pickLabel: String,
+        chancePct: Int,
+        modelVersion: String,
+        lockedAtIso: String,
+    ): String = sha256Hex("$fixtureId|$matchup|$pickLabel|$chancePct|$modelVersion|$lockedAtIso")
 
     // -------------------------------------------------------------------------
     // Internal De-Vig Solvers
@@ -532,9 +615,6 @@ object OddsMath {
         return DoubleArray(values.size) { i -> values[i] / sum }
     }
 
-    /**
-     * Shin (1991/1993) insider-trading de-vig solver via bisection on insider share z in [0, 1).
-     */
     private fun solveShin(rawProbs: DoubleArray, overround: Double): DoubleArray {
         var lo = 0.0
         var hi = 1.0 - 1e-9
@@ -550,52 +630,33 @@ object OddsMath {
 
         repeat(SOLVER_ITERATIONS) {
             val mid = 0.5 * (lo + hi)
-            val sum = shinProbs(mid).sum()
-            if (sum > 1.0) {
-                lo = mid
-            } else {
-                hi = mid
-            }
+            if (shinProbs(mid).sum() > 1.0) lo = mid else hi = mid
         }
-
         return normalize(shinProbs(0.5 * (lo + hi)))
     }
 
-    /**
-     * Power (logarithmic) de-vig solver finding k > 1 such that sum(q_i^k) = 1.
-     */
     private fun solvePower(rawProbs: DoubleArray): DoubleArray {
         var lo = 1.0
         var hi = 2.0
 
         fun powerSum(k: Double): Double {
             var sum = 0.0
-            for (q in rawProbs) {
-                sum += q.pow(k)
-            }
+            for (q in rawProbs) sum += q.pow(k)
             return sum
         }
 
-        while (powerSum(hi) > 1.0 && hi < 128.0) {
+        while (powerSum(hi) > 1.0 && hi < 1e4) {
             hi *= 2.0
         }
 
         repeat(SOLVER_ITERATIONS) {
             val mid = 0.5 * (lo + hi)
-            if (powerSum(mid) > 1.0) {
-                lo = mid
-            } else {
-                hi = mid
-            }
+            if (powerSum(mid) > 1.0) lo = mid else hi = mid
         }
-
         val k = 0.5 * (lo + hi)
         return normalize(DoubleArray(rawProbs.size) { i -> rawProbs[i].pow(k) })
     }
 
-    /**
-     * Additive (equal-margin) de-vig solver subtracting (S - 1) / n from each implied probability.
-     */
     private fun solveAdditive(rawProbs: DoubleArray, overround: Double): DoubleArray {
         val marginPerOutcome = (overround - 1.0) / rawProbs.size.toDouble()
         val adjusted = DoubleArray(rawProbs.size) { i ->
@@ -604,9 +665,6 @@ object OddsMath {
         return normalize(adjusted)
     }
 
-    /**
-     * Odds-Ratio (Cheung) de-vig solver finding c > 1 such that sum(q_i / (q_i + c * (1 - q_i))) = 1.
-     */
     private fun solveOddsRatio(rawProbs: DoubleArray): DoubleArray {
         var lo = 1.0
         var hi = 2.0
@@ -625,29 +683,24 @@ object OddsMath {
 
         repeat(SOLVER_ITERATIONS) {
             val mid = 0.5 * (lo + hi)
-            if (ratioProbs(mid).sum() > 1.0) {
-                lo = mid
-            } else {
-                hi = mid
-            }
+            if (ratioProbs(mid).sum() > 1.0) lo = mid else hi = mid
         }
-
         return normalize(ratioProbs(0.5 * (lo + hi)))
     }
 
     // -------------------------------------------------------------------------
-    // Internal Math & Formatting Helpers
+    // Internal Formatting Helpers
     // -------------------------------------------------------------------------
 
     private fun formatFractionalOdds(netOdds: Double): String {
         if (!netOdds.isFinite() || netOdds <= 0.0) return "--"
 
-        var bestNum = 1
-        var bestDen = 1
+        var bestNum = 1L
+        var bestDen = 1L
         var bestErr = Double.POSITIVE_INFINITY
 
-        for (den in 1..MAX_FRACTIONAL_DENOMINATOR) {
-            val num = (netOdds * den).roundToInt().coerceAtLeast(1)
+        for (den in 1L..MAX_FRACTIONAL_DENOMINATOR.toLong()) {
+            val num = (netOdds * den).roundToLong().coerceAtLeast(1L)
             val err = abs(netOdds - num.toDouble() / den.toDouble())
             if (err < bestErr) {
                 bestErr = err
@@ -661,36 +714,20 @@ object OddsMath {
             return "${bestNum / g}/${bestDen / g}"
         }
 
-        val scaledNum = (netOdds * 100.0).roundToInt().coerceAtLeast(1)
-        val scaledDen = 100
-        val g = gcd(scaledNum, scaledDen)
-        return "${scaledNum / g}/${scaledDen / g}"
+        val scale = if (netOdds < 0.01) 1000L else 100L
+        val scaledNum = (netOdds * scale).roundToLong().coerceAtLeast(1L)
+        val g = gcd(scaledNum, scale)
+        return "${scaledNum / g}/${scale / g}"
     }
 
-    private fun gcd(a: Int, b: Int): Int {
+    private fun gcd(a: Long, b: Long): Long {
         var x = abs(a)
         var y = abs(b)
-        while (y != 0) {
+        while (y != 0L) {
             val r = x % y
             x = y
             y = r
         }
-        return if (x == 0) 1 else x
-    }
-
-    private fun normalCdf(z: Double): Double {
-        return 0.5 * (1.0 + erf(z / sqrt(2.0)))
-    }
-
-    /**
-     * Abramowitz & Stegun 7.1.26 approximation of the error function (max error < 1.5e-7).
-     */
-    private fun erf(x: Double): Double {
-        val sign = if (x < 0.0) -1.0 else 1.0
-        val ax = abs(x)
-        val t = 1.0 / (1.0 + 0.3275911 * ax)
-        val poly = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t
-        val y = 1.0 - poly * exp(-ax * ax)
-        return sign * y
+        return if (x == 0L) 1L else x
     }
 }
