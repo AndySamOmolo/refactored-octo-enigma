@@ -209,7 +209,7 @@ fun GamesScreen(
             val matchesOver25 = !highOver25Only || (fx.sport == Sport.FOOTBALL && fx.markets.over25Pct >= 58)
             val matchesUnder25 = !highUnder25Only || (fx.sport == Sport.FOOTBALL && (100 - fx.markets.over25Pct) >= 58)
             val matchesDraw = !highDrawOnly || (fx.sport.hasDraw && (fx.markets.probDraw * 100.0) >= 28.0)
-            val matchesLiveOdds = !liveOddsOnly || fx.bookOdds.isNotEmpty()
+            val matchesLiveOdds = !liveOddsOnly || fx.bookmakerOdds.isNotEmpty()
             val matchesToday = !todayOnly || runCatching {
                 val inst = runCatching { OffsetDateTime.parse(fx.kickoffIso).toInstant() }
                     .getOrElse { Instant.parse(fx.kickoffIso) }
@@ -433,12 +433,12 @@ fun GamesScreen(
                         fixture = fx,
                         homePower = hp?.powerScore ?: 50,
                         awayPower = ap?.powerScore ?: 50,
-                        homeForm = hp?.form ?: emptyList(),
-                        awayForm = ap?.form ?: emptyList(),
+                        homeForm = hp?.recentForm ?: emptyList(),
+                        awayForm = ap?.recentForm ?: emptyList(),
                         isPinned = isPinned,
-                        layoutMode = tokens.config.fixtureLayoutMode,
+                        layoutMode = tokens.config.fixtureLayout,
                         highlightMarketMode = sortMode,
-                        onTogglePin = { app.prefsRepo.togglePinnedTeam(fx.homeTeam) },
+                        onTogglePin = { app.prefsRepo.togglePinTeam(fx.homeTeam) },
                         onClick = { onOpenMatch(fx.id) },
                     )
                 }
@@ -673,33 +673,6 @@ private fun FixtureCard(
     val t = AppTheme.tokens
     val c = t.colors
     val topPick = fixture.markets.topPicks.firstOrNull()
-
-    if (layoutMode == FixtureLayoutMode.TICKER) {
-        SectionCard(modifier = Modifier.clickable(onClick = onClick)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("${fixture.leagueName} · ${formatLocalKickoff(fixture.kickoffIso)}", color = c.accent, fontSize = scaledSp(11f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("${fixture.homeTeam} vs ${fixture.awayTeam}", color = c.text, fontSize = scaledSp(13.5f), fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (topPick != null) {
-                        Text("${topPick.label} (${topPick.chancePct}%)", color = c.textSecondary, fontSize = scaledSp(11.5f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    val hpct = (fixture.markets.probHome * 100.0).roundToInt()
-                    val apct = (fixture.markets.probAway * 100.0).roundToInt()
-                    Text("$hpct% / $apct%", style = tabularStyle(13f, FontWeight.ExtraBold, c.text))
-                    if (fixture.bestValueEdgePct != null) {
-                        StatusBadge("+${String.format(Locale.US, "%.1f", fixture.bestValueEdgePct)}% EV", c.valueHighlight, c.valueHighlightDim)
-                    }
-                }
-            }
-        }
-        return
-    }
 
     if (layoutMode == FixtureLayoutMode.COMPACT_ROW) {
         SectionCard(modifier = Modifier.clickable(onClick = onClick)) {

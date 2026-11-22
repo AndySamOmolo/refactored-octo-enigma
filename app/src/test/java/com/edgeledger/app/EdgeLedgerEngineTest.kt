@@ -418,11 +418,11 @@ class EdgeLedgerEngineTest {
             .copy(bttsYesPct = 38, over25Pct = 32, probDraw = 0.34)
         val fxHigh = com.edgeledger.app.model.MatchFixture(
             id = "fx1", sport = Sport.FOOTBALL, leagueId = "E0", leagueName = "Premier League",
-            kickoffIso = "2026-11-23T15:00:00Z", homeTeam = "Liverpool", awayTeam = "Man City", markets = mHighBtts,
+            kickoffIso = "2026-11-23T15:00:00Z", homeTeam = "Liverpool", awayTeam = "Man City", markets = mHighBtts, plainInsights = emptyList(), bookmakerOdds = emptyList(), h2hGames = emptyList(),
         )
         val fxLow = com.edgeledger.app.model.MatchFixture(
             id = "fx2", sport = Sport.FOOTBALL, leagueId = "SP1", leagueName = "La Liga",
-            kickoffIso = "2026-11-23T17:00:00Z", homeTeam = "Getafe", awayTeam = "Cadiz", markets = mLowBtts,
+            kickoffIso = "2026-11-23T17:00:00Z", homeTeam = "Getafe", awayTeam = "Cadiz", markets = mLowBtts, plainInsights = emptyList(), bookmakerOdds = emptyList(), h2hGames = emptyList(),
         )
 
         val byBtts = GamesFilterSort.sortFixtures(listOf(fxLow, fxHigh), GameSortMode.BTTS_HIGH) { 50 to 50 }

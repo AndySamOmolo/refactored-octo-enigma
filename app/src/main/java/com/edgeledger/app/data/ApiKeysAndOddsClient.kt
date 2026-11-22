@@ -113,7 +113,7 @@ class OptionalOddsAndDataClient(
 
     private fun currentMonthlyWindow(): String = LocalDate.now(ZoneOffset.UTC).toString().take(7)
 
-    internal suspend fun executeCachedGet(
+    private suspend fun executeCachedGet(
         cacheKey: String,
         provider: String,
         requestBuilder: Request.Builder,
