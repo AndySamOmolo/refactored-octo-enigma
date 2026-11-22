@@ -18,7 +18,7 @@ object SeedData {
         "Chelsea" to StadiumLocation("Stamford Bridge", 51.4817, -0.1910),
         "Manchester City" to StadiumLocation("Etihad Stadium", 53.4831, -2.2004),
         "Manchester United" to StadiumLocation("Old Trafford", 53.4631, -2.2913),
-        "Tottenham" to StadiumLocation("Tottenham Hotspur Stadium", 51.6042, -0.0662),
+        "Tottenham Hotspur" to StadiumLocation("Tottenham Hotspur Stadium", 51.6042, -0.0662),
         "Newcastle United" to StadiumLocation("St James' Park", 54.9756, -1.6217),
         "Aston Villa" to StadiumLocation("Villa Park", 52.5092, -1.8847),
         "Barcelona" to StadiumLocation("Camp Nou", 41.3809, 2.1228),

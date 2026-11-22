@@ -90,6 +90,7 @@ import com.edgeledger.app.ui.components.ProbBar
 import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatusBadge
 import com.edgeledger.app.ui.components.TeamAvatar
+import com.edgeledger.app.ui.components.SegmentedTabs
 import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.scaledSp
 import kotlinx.coroutines.launch
@@ -109,7 +110,10 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     val canRedo by app.prefsRepo.canRedoFlow.collectAsStateWithLifecycle()
     val prefs by app.prefsRepo.prefs.collectAsStateWithLifecycle()
     val apiKeys by app.prefsRepo.apiKeys.collectAsStateWithLifecycle()
-    val quotas by app.syncRepo.providerQuotas.collectAsStateWithLifecycle()
+    val persistedQuotas by app.syncRepo.apiQuotas.collectAsStateWithLifecycle(initialValue = emptyList())
+    val quotas = remember(apiKeys, persistedQuotas) {
+        app.syncRepo.getQuotaSummaryWithPersistence(apiKeys, persistedQuotas)
+    }
     val syncing by app.syncRepo.syncing.collectAsStateWithLifecycle()
     val persistErr by app.prefsRepo.persistenceError.collectAsStateWithLifecycle()
 
@@ -180,7 +184,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Settings", color = c.text, fontSize = scaledSp(21f), fontWeight = FontWeight.ExtraBold)
+                    Text("Settings", color = c.text, fontSize = scaledSp(19f), fontWeight = FontWeight.ExtraBold)
                     StatusBadge(
                         text = "WCAG ${String.format(Locale.US, "%.1f", textContrast)}:1 ${when { textContrast >= 7.0f -> "AAA"; textContrast >= 4.5f -> "AA"; else -> "FAIL" }}",
                         color = if (textContrast >= 4.5f) c.win else c.loss,
@@ -192,20 +196,14 @@ fun SettingsScreen(app: EdgeLedgerApp) {
         }
 
         item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                val sections = listOf("Theme", "APIs", "Model", "Alerts")
-                sections.forEachIndexed { idx, lbl ->
-                    TokenPill(
-                        label = lbl,
-                        selected = sectionTab == idx,
-                        onClick = {
-                            sectionTab = idx
-                            if (idx == 1) app.syncRepo.refreshQuotaSummary()
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
+            SegmentedTabs(
+                tabs = listOf("Theme", "APIs", "Model", "Alerts"),
+                selectedIndex = sectionTab,
+                onSelect = { idx ->
+                    sectionTab = idx
+                    if (idx == 1) app.syncRepo.refreshQuotaSummary()
+                },
+            )
         }
 
         if (!persistErr.isNullOrBlank()) {
@@ -231,10 +229,14 @@ fun SettingsScreen(app: EdgeLedgerApp) {
         when (sectionTab) {
             0 -> {
                 item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        TokenPill("Simple Editor", !advancedMode, { advancedMode = false; activeColorRole = activeColorRole.coerceIn(0, 3) }, Modifier.weight(1f))
-                        TokenPill("Advanced Tokens", advancedMode, { advancedMode = true }, Modifier.weight(1f))
-                    }
+                    SegmentedTabs(
+                        tabs = listOf("Simple Editor", "Advanced Tokens"),
+                        selectedIndex = if (advancedMode) 1 else 0,
+                        onSelect = { idx ->
+                            advancedMode = idx == 1
+                            if (!advancedMode) activeColorRole = activeColorRole.coerceIn(0, 3)
+                        },
+                    )
                 }
 
                 item {
@@ -948,7 +950,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
             }
         }
 
-        item { Spacer(Modifier.height(88.dp)) }
+        item { Spacer(Modifier.height(16.dp)) }
     }
 }
 

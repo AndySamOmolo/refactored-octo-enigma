@@ -329,7 +329,7 @@ fun MatchDetailScreen(
                                 Button(
                                     onClick = { savePick(pick.label, 100.0 / max(15, pick.chancePct), pick.chancePct / 100.0) },
                                     colors = ButtonDefaults.buttonColors(containerColor = c.accent),
-                                    shape = RoundedCornerShape(tokens.cornerSm),
+                                    shape = tokens.shapes.small,
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 ) {
                                     Text("Save", color = c.onAccent, fontSize = scaledSp(12f), fontWeight = FontWeight.Bold)

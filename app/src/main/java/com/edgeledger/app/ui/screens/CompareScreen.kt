@@ -4,7 +4,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -120,7 +122,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
     ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Compare Any Two Teams", color = c.text, fontSize = scaledSp(20f), fontWeight = FontWeight.ExtraBold)
+                Text("Compare Any Two Teams", color = c.text, fontSize = scaledSp(19f), fontWeight = FontWeight.ExtraBold)
                 Text("Tap either team card to pick any matchup and predict all markets 100% offline.", color = c.textMuted, fontSize = scaledSp(13f))
             }
         }
@@ -327,7 +329,7 @@ fun CompareScreen(app: EdgeLedgerApp) {
             }
         }
 
-        item { Spacer(Modifier.height(88.dp)) }
+        item { Spacer(Modifier.height(16.dp)) }
     }
 
     if (pickingSlot != null) {

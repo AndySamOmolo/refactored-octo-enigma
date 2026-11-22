@@ -67,6 +67,7 @@ data class ProviderQuotaStatus(
 
 class OptionalOddsAndDataClient(
     private val client: OkHttpClient,
+    private val dao: EdgeLedgerDao? = null,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -102,7 +103,174 @@ class OptionalOddsAndDataClient(
         return baos.toString(Charsets.UTF_8.name())
     }
 
-    fun fetchTheOddsApi(
+    private data class CachedHttpResult(
+        val body: String?,
+        val fromCache: Boolean,
+        val remainingHeader: String? = null,
+    )
+
+    private fun currentDailyWindow(): String = LocalDate.now(ZoneOffset.UTC).toString()
+
+    private fun currentMonthlyWindow(): String = LocalDate.now(ZoneOffset.UTC).toString().take(7)
+
+    internal suspend fun executeCachedGet(
+        cacheKey: String,
+        provider: String,
+        requestBuilder: Request.Builder,
+        ttlMs: Long,
+        windowKey: String,
+        hardLimit: Int,
+        useAuthClient: Boolean = true,
+    ): CachedHttpResult {
+        val nowMs = System.currentTimeMillis()
+        val cached = runCatching { dao?.getApiCache(cacheKey) }.getOrNull()
+        if (cached != null && nowMs < cached.expiresAtEpochMs && cached.payloadJson.isNotBlank()) {
+            val minsLeft = ((cached.expiresAtEpochMs - nowMs) / 60_000L).coerceAtLeast(1L)
+            setStatus(provider, "Cached (${minsLeft}m TTL left)")
+            return CachedHttpResult(body = cached.payloadJson, fromCache = true)
+        }
+
+        val existingQuota = runCatching { dao?.getApiQuota(provider) }.getOrNull()
+        val sameWindow = existingQuota != null && existingQuota.windowKey == windowKey
+        val usedInWindow = if (sameWindow) existingQuota!!.callsUsed else 0
+        val serverRem = if (sameWindow) existingQuota!!.serverRemaining else null
+        val cooldownUntil = existingQuota?.cooldownUntilEpochMs ?: 0L
+
+        if (nowMs < cooldownUntil) {
+            val mins = ((cooldownUntil - nowMs) / 60_000L).coerceAtLeast(1L)
+            setStatus(provider, "Cooldown (${mins}m) · using cache")
+            return CachedHttpResult(body = cached?.payloadJson, fromCache = true)
+        }
+        if (usedInWindow >= hardLimit || (serverRem != null && serverRem <= 0)) {
+            setStatus(provider, "Quota cap ($usedInWindow/$hardLimit) · cached")
+            return CachedHttpResult(body = cached?.payloadJson, fromCache = true)
+        }
+
+        if (!cached?.etag.isNullOrBlank()) {
+            requestBuilder.header("If-None-Match", cached!!.etag!!)
+        }
+        val req = requestBuilder.build()
+        val httpClient = if (useAuthClient) authClient else client
+
+        return try {
+            incrementCalls(provider)
+            httpClient.newCall(req).execute().use { response ->
+                val remainingStr = response.header("x-requests-remaining")
+                val remainingInt = remainingStr?.toIntOrNull()
+                val usedHeader = response.header("x-requests-used")?.toIntOrNull()
+                val nextUsed = usedHeader ?: (usedInWindow + 1)
+                if (usedHeader != null) {
+                    callsByProvider.computeIfAbsent(provider) { AtomicInteger(0) }.set(usedHeader)
+                }
+
+                when {
+                    response.code == 304 && cached != null -> {
+                        val refreshed = cached.copy(fetchedAtEpochMs = nowMs, expiresAtEpochMs = nowMs + ttlMs)
+                        runCatching { dao?.putApiCache(refreshed) }
+                        val statusStr = "Cached (304 unchanged)"
+                        setStatus(provider, statusStr)
+                        runCatching {
+                            dao?.upsertApiQuota(
+                                ApiQuotaEntity(
+                                    provider = provider,
+                                    windowKey = windowKey,
+                                    callsUsed = nextUsed,
+                                    serverRemaining = remainingInt ?: serverRem,
+                                    hardLimit = hardLimit,
+                                    lastStatus = statusStr,
+                                    cooldownUntilEpochMs = 0L,
+                                    updatedAtEpochMs = nowMs,
+                                )
+                            )
+                        }
+                        CachedHttpResult(body = cached.payloadJson, fromCache = true, remainingHeader = remainingStr)
+                    }
+                    response.code == 429 -> {
+                        val retrySec = response.header("Retry-After")?.toLongOrNull()?.coerceIn(60L, 7200L) ?: 1800L
+                        val untilMs = nowMs + retrySec * 1000L
+                        val statusStr = "HTTP 429 · paused ${retrySec / 60}m"
+                        setStatus(provider, statusStr)
+                        runCatching {
+                            dao?.upsertApiQuota(
+                                ApiQuotaEntity(
+                                    provider = provider,
+                                    windowKey = windowKey,
+                                    callsUsed = nextUsed,
+                                    serverRemaining = remainingInt ?: serverRem,
+                                    hardLimit = hardLimit,
+                                    lastStatus = statusStr,
+                                    cooldownUntilEpochMs = untilMs,
+                                    updatedAtEpochMs = nowMs,
+                                )
+                            )
+                        }
+                        CachedHttpResult(body = cached?.payloadJson, fromCache = cached != null, remainingHeader = remainingStr)
+                    }
+                    response.isSuccessful -> {
+                        val body = readBoundedBody(response)
+                        if (body.isNotBlank()) {
+                            runCatching {
+                                dao?.putApiCache(
+                                    ApiResponseCacheEntity(
+                                        cacheKey = cacheKey,
+                                        provider = provider,
+                                        payloadJson = body,
+                                        fetchedAtEpochMs = nowMs,
+                                        expiresAtEpochMs = nowMs + ttlMs,
+                                        httpStatus = response.code,
+                                        etag = response.header("ETag"),
+                                    )
+                                )
+                            }
+                        }
+                        val remNote = remainingStr?.let { " · $it left" }.orEmpty()
+                        val statusStr = "Live OK ($nextUsed/$hardLimit$remNote)"
+                        runCatching {
+                            dao?.upsertApiQuota(
+                                ApiQuotaEntity(
+                                    provider = provider,
+                                    windowKey = windowKey,
+                                    callsUsed = nextUsed,
+                                    serverRemaining = remainingInt ?: serverRem,
+                                    hardLimit = hardLimit,
+                                    lastStatus = statusStr,
+                                    cooldownUntilEpochMs = 0L,
+                                    updatedAtEpochMs = nowMs,
+                                )
+                            )
+                        }
+                        CachedHttpResult(body = body.ifBlank { cached?.payloadJson }, fromCache = false, remainingHeader = remainingStr)
+                    }
+                    else -> {
+                        val statusStr = "HTTP ${response.code}${remainingStr?.let { " ($it left)" }.orEmpty()}"
+                        setStatus(provider, statusStr)
+                        runCatching {
+                            dao?.upsertApiQuota(
+                                ApiQuotaEntity(
+                                    provider = provider,
+                                    windowKey = windowKey,
+                                    callsUsed = nextUsed,
+                                    serverRemaining = remainingInt ?: serverRem,
+                                    hardLimit = hardLimit,
+                                    lastStatus = statusStr,
+                                    cooldownUntilEpochMs = 0L,
+                                    updatedAtEpochMs = nowMs,
+                                )
+                            )
+                        }
+                        CachedHttpResult(body = cached?.payloadJson, fromCache = cached != null, remainingHeader = remainingStr)
+                    }
+                }
+            }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: IOException) {
+            setStatus(provider, if (cached != null) "Offline · using cache" else "Network error: ${sanitizeError(e)}")
+            CachedHttpResult(body = cached?.payloadJson, fromCache = cached != null)
+        }
+    }
+
+    suspend fun fetchTheOddsApi(
         sportKey: String,
         apiKey: String,
     ): Map<String, List<BookmakerOddsLine>> {
@@ -131,33 +299,24 @@ class OptionalOddsAndDataClient(
                 .addQueryParameter("oddsFormat", "decimal")
                 .build()
 
-            val request = Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
                 .get()
-                .build()
 
-            incrementCalls(PROVIDER_THE_ODDS_API)
-            authClient.newCall(request).execute().use { response ->
-                val remaining = response.header("x-requests-remaining")
-                val usedHeader = response.header("x-requests-used")?.toIntOrNull()
-                if (usedHeader != null) {
-                    callsByProvider.computeIfAbsent(PROVIDER_THE_ODDS_API) { AtomicInteger(0) }.set(usedHeader)
-                }
-
-                if (!response.isSuccessful) {
-                    setStatus(
-                        PROVIDER_THE_ODDS_API,
-                        "HTTP ${response.code}${remaining?.let { " ($it credits left)" }.orEmpty()}",
-                    )
-                    return emptyMap()
-                }
-
-                val body = readBoundedBody(response)
-                if (body.isBlank()) {
-                    setStatus(PROVIDER_THE_ODDS_API, "Empty response")
-                    return emptyMap()
-                }
+            val cachedRes = executeCachedGet(
+                cacheKey = "the_odds_api:$cleanSport",
+                provider = PROVIDER_THE_ODDS_API,
+                requestBuilder = requestBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentMonthlyWindow(),
+                hardLimit = 450,
+                useAuthClient = true,
+            )
+            val remaining = cachedRes.remainingHeader
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyMap()
+            run {
 
                 val root = json.parseToJsonElement(body) as? JsonArray ?: run {
                     setStatus(PROVIDER_THE_ODDS_API, "Unexpected JSON payload")
@@ -230,8 +389,10 @@ class OptionalOddsAndDataClient(
                     }
                 }
 
-                val quotaNote = remaining?.let { " · $it credits left" }.orEmpty()
-                setStatus(PROVIDER_THE_ODDS_API, "OK (${result.size} events$quotaNote)")
+                if (!cachedRes.fromCache) {
+                    val quotaNote = remaining?.let { " · $it credits left" }.orEmpty()
+                    setStatus(PROVIDER_THE_ODDS_API, "OK (${result.size} events$quotaNote)")
+                }
                 result
             }
         } catch (ce: CancellationException) {
@@ -245,7 +406,7 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    fun fetchFootballDataOrgFixtures(apiKey: String): List<RawUpcomingEvent> {
+    suspend fun fetchFootballDataOrgFixtures(apiKey: String): List<RawUpcomingEvent> {
         val cleanKey = sanitizeKey(apiKey)
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_FOOTBALL_DATA, "Not configured")
@@ -261,25 +422,24 @@ class OptionalOddsAndDataClient(
                 .addQueryParameter("dateTo", today.plusDays(7).toString())
                 .build()
 
-            val request = Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url(url)
                 .header("X-Auth-Token", cleanKey)
                 .header("Accept", "application/json")
                 .get()
-                .build()
 
-            incrementCalls(PROVIDER_FOOTBALL_DATA)
-            authClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    setStatus(PROVIDER_FOOTBALL_DATA, "HTTP ${response.code}")
-                    return emptyList()
-                }
-
-                val body = readBoundedBody(response)
-                if (body.isBlank()) {
-                    setStatus(PROVIDER_FOOTBALL_DATA, "Empty response")
-                    return emptyList()
-                }
+            val cachedRes = executeCachedGet(
+                cacheKey = "football_data_org:matches:$today",
+                provider = PROVIDER_FOOTBALL_DATA,
+                requestBuilder = requestBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 120,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            run {
 
                 val root = json.parseToJsonElement(body) as? JsonObject ?: run {
                     setStatus(PROVIDER_FOOTBALL_DATA, "Unexpected JSON payload")
@@ -346,19 +506,20 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    fun fetchPolymarketOdds(): List<Pair<String, Double>> {
+    suspend fun fetchPolymarketOdds(): List<Pair<String, Double>> {
         return try {
+            // Verified late-2026 Gamma API: /events with sports tag_id=100639 (each event embeds child markets[])
             val primaryUrl =
-                "https://gamma-api.polymarket.com/markets?active=true&closed=false&order=volume24hr&ascending=false&limit=100"
+                "https://gamma-api.polymarket.com/events?tag_id=100639&active=true&closed=false&order=volume24hr&ascending=false&limit=50"
             val fallbackUrl =
-                "https://gamma-api.polymarket.com/markets?active=true&closed=false&tag=sports&order=volume24hr&ascending=false&limit=100"
-            val primary = fetchPolymarketUrl(primaryUrl, requireSportsKeyword = true) ?: return emptyList()
+                "https://gamma-api.polymarket.com/events?tag_slug=sports&active=true&closed=false&order=volume24hr&ascending=false&limit=50"
+            val primary = fetchPolymarketEventsUrl("polymarket:events_sports_id", primaryUrl)
             val resolved = if (primary.isNotEmpty()) {
                 primary
             } else {
-                fetchPolymarketUrl(fallbackUrl, requireSportsKeyword = false).orEmpty()
+                fetchPolymarketEventsUrl("polymarket:events_sports_slug", fallbackUrl)
             }.distinctBy { it.first.lowercase(Locale.US) }
-            setStatus(PROVIDER_POLYMARKET, "OK (${resolved.size} sports markets)")
+            setStatus(PROVIDER_POLYMARKET, if (resolved.isNotEmpty()) "OK (${resolved.size} sports markets)" else "No active sports markets")
             resolved
         } catch (ce: CancellationException) {
             throw ce
@@ -371,49 +532,59 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    private fun fetchPolymarketUrl(url: String, requireSportsKeyword: Boolean): List<Pair<String, Double>>? {
-        val request = Request.Builder()
+    private suspend fun fetchPolymarketEventsUrl(cacheKey: String, url: String): List<Pair<String, Double>> {
+        val requestBuilder = Request.Builder()
             .url(url)
             .header("Accept", "application/json")
             .get()
-            .build()
-        incrementCalls(PROVIDER_POLYMARKET)
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                setStatus(PROVIDER_POLYMARKET, "HTTP ${response.code}")
-                return null
-            }
-            val body = readBoundedBody(response)
-            if (body.isBlank()) {
-                setStatus(PROVIDER_POLYMARKET, "Empty response")
-                return null
-            }
-            val markets = json.parseToJsonElement(body) as? JsonArray ?: run {
-                setStatus(PROVIDER_POLYMARKET, "Unexpected JSON payload")
-                return null
-            }
-            val pairs = mutableListOf<Pair<String, Double>>()
-            for (marketElem in markets) {
-                val marketObj = marketElem as? JsonObject ?: continue
-                val question = marketObj.stringOrNull("question")?.trim().orEmpty()
-                if (question.isBlank()) continue
-                val meta = listOfNotNull(
-                    marketObj.stringOrNull("category"),
-                    marketObj.stringOrNull("slug"),
-                    marketObj.stringOrNull("groupItemTitle"),
-                ).joinToString(" ")
-                val ok = if (requireSportsKeyword) isSportsMarketQuestion(question, meta) else !isBlockedNonSportsMarket(question)
-                if (!ok) continue
-                val yesProb = extractPolymarketYesProbability(marketObj) ?: continue
-                if (yesProb.isFinite() && yesProb in 0.01..0.99) {
-                    pairs.add(question to yesProb)
-                }
-            }
-            return pairs
-        }
+        val cachedRes = executeCachedGet(
+            cacheKey = cacheKey,
+            provider = PROVIDER_POLYMARKET,
+            requestBuilder = requestBuilder,
+            ttlMs = TTL_30_MIN_MS,
+            windowKey = currentDailyWindow(),
+            hardLimit = 500,
+            useAuthClient = false,
+        )
+        val body = cachedRes.body.orEmpty()
+        if (body.isBlank()) return emptyList()
+        return parsePolymarketEventsPayload(body)
     }
 
-    fun fetchCricketMatches(apiKey: String): List<RawUpcomingEvent> {
+    internal fun parsePolymarketEventsPayload(body: String): List<Pair<String, Double>> {
+        val root = runCatching { json.parseToJsonElement(body) as? JsonArray }.getOrNull() ?: return emptyList()
+        val pairs = mutableListOf<Pair<String, Double>>()
+        for (elem in root) {
+            val obj = elem as? JsonObject ?: continue
+            // Supports both /events (with nested markets[]) and flat /markets arrays
+            val nestedMarkets = obj.arrayOrNull("markets")
+            val marketObjs = if (nestedMarkets != null && nestedMarkets.isNotEmpty()) {
+                nestedMarkets.mapNotNull { it as? JsonObject }
+            } else {
+                listOf(obj)
+            }
+            val eventTitle = obj.stringOrNull("title")?.trim().orEmpty()
+            for (marketObj in marketObjs) {
+                if (marketObj.booleanOrNull("closed") == true) continue
+                val question = marketObj.stringOrNull("question")?.trim().takeIf { !it.isNullOrBlank() }
+                    ?: eventTitle
+                if (question.isBlank() || isBlockedNonSportsMarket(question)) continue
+                val outcomes = parseStringOrJsonArray(marketObj["outcomes"])
+                val yesProb = extractPolymarketYesProbability(marketObj) ?: continue
+                if (!yesProb.isFinite() || yesProb !in 0.01..0.99) continue
+                val hasYes = outcomes.any { it.equals("Yes", ignoreCase = true) }
+                val label = if (!hasYes && outcomes.isNotEmpty() && outcomes[0].isNotBlank()) {
+                    "$question (${outcomes[0]})"
+                } else {
+                    question
+                }
+                pairs.add(label to yesProb)
+            }
+        }
+        return pairs
+    }
+
+    suspend fun fetchCricketMatches(apiKey: String): List<RawUpcomingEvent> {
         val cleanKey = sanitizeKey(apiKey)
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_CRICKET_DATA, "Not configured")
@@ -428,24 +599,23 @@ class OptionalOddsAndDataClient(
                 .addQueryParameter("offset", "0")
                 .build()
 
-            val request = Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
                 .get()
-                .build()
 
-            incrementCalls(PROVIDER_CRICKET_DATA)
-            authClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    setStatus(PROVIDER_CRICKET_DATA, "HTTP ${response.code}")
-                    return emptyList()
-                }
-
-                val body = readBoundedBody(response)
-                if (body.isBlank()) {
-                    setStatus(PROVIDER_CRICKET_DATA, "Empty response")
-                    return emptyList()
-                }
+            val cachedRes = executeCachedGet(
+                cacheKey = "cricket_data:currentMatches",
+                provider = PROVIDER_CRICKET_DATA,
+                requestBuilder = requestBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 85,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            run {
 
                 val root = json.parseToJsonElement(body) as? JsonObject ?: run {
                     setStatus(PROVIDER_CRICKET_DATA, "Unexpected JSON payload")
@@ -514,64 +684,58 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    fun fetchKalshiOdds(): List<Pair<String, Double>> {
+    suspend fun fetchKalshiOdds(): List<Pair<String, Double>> {
         return try {
-            val request = Request.Builder()
-                .url("https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=200")
-                .header("Accept", "application/json")
-                .get()
-                .build()
-
-            incrementCalls(PROVIDER_KALSHI)
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    setStatus(PROVIDER_KALSHI, "HTTP ${response.code}")
-                    return emptyList()
+            val pairs = mutableListOf<Pair<String, Double>>()
+            // Verified late-2026 Kalshi v2 sports series tickers (keyless REST on api.elections.kalshi.com)
+            for (series in KALSHI_SPORTS_SERIES) {
+                val url = "https://api.elections.kalshi.com/trade-api/v2/markets?status=open&series_ticker=$series&limit=30"
+                val reqBuilder = Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/json")
+                    .get()
+                val cachedRes = executeCachedGet(
+                    cacheKey = "kalshi:series:$series",
+                    provider = PROVIDER_KALSHI,
+                    requestBuilder = reqBuilder,
+                    ttlMs = TTL_30_MIN_MS,
+                    windowKey = currentDailyWindow(),
+                    hardLimit = 600,
+                    useAuthClient = false,
+                )
+                val body = cachedRes.body.orEmpty()
+                if (body.isNotBlank()) {
+                    pairs.addAll(parseKalshiMarketsPayload(body, requireSportsFilter = false))
                 }
-
-                val body = readBoundedBody(response)
-                if (body.isBlank()) {
-                    setStatus(PROVIDER_KALSHI, "Empty response")
-                    return emptyList()
-                }
-
-                val root = json.parseToJsonElement(body) as? JsonObject ?: run {
-                    setStatus(PROVIDER_KALSHI, "Unexpected JSON payload")
-                    return emptyList()
-                }
-
-                val markets = root.arrayOrNull("markets") ?: run {
-                    setStatus(PROVIDER_KALSHI, "OK (0 markets)")
-                    return emptyList()
-                }
-
-                val pairs = mutableListOf<Pair<String, Double>>()
-                for (marketElem in markets) {
-                    val marketObj = marketElem as? JsonObject ?: continue
-                    val title = marketObj.stringOrNull("title")?.takeIf { it.isNotBlank() }
-                        ?: marketObj.stringOrNull("ticker").orEmpty()
-                    if (title.isBlank()) continue
-                    val meta = listOfNotNull(
-                        marketObj.stringOrNull("category"),
-                        marketObj.stringOrNull("event_ticker"),
-                        marketObj.stringOrNull("series_ticker"),
-                        marketObj.stringOrNull("subtitle"),
-                    ).joinToString(" ")
-                    if (!isSportsMarketQuestion(title, meta)) continue
-
-                    val yesProb = extractKalshiYesProbability(marketObj) ?: continue
-                    if (yesProb.isFinite() && yesProb in 0.01..0.99) {
-                        pairs.add(title.trim() to yesProb)
-                    }
-                }
-
-                setStatus(PROVIDER_KALSHI, "OK (${pairs.size} sports markets)")
-                pairs
             }
+            // Fallback general open-markets scan excluding multivariate combos (MVE)
+            if (pairs.isEmpty()) {
+                val fallbackUrl = "https://api.elections.kalshi.com/trade-api/v2/markets?status=open&mve_filter=exclude&limit=100"
+                val reqBuilder = Request.Builder()
+                    .url(fallbackUrl)
+                    .header("Accept", "application/json")
+                    .get()
+                val cachedRes = executeCachedGet(
+                    cacheKey = "kalshi:open_fallback",
+                    provider = PROVIDER_KALSHI,
+                    requestBuilder = reqBuilder,
+                    ttlMs = TTL_30_MIN_MS,
+                    windowKey = currentDailyWindow(),
+                    hardLimit = 600,
+                    useAuthClient = false,
+                )
+                val body = cachedRes.body.orEmpty()
+                if (body.isNotBlank()) {
+                    pairs.addAll(parseKalshiMarketsPayload(body, requireSportsFilter = true))
+                }
+            }
+            val deduped = pairs.distinctBy { it.first.lowercase(Locale.US) }
+            setStatus(PROVIDER_KALSHI, if (deduped.isNotEmpty()) "OK (${deduped.size} sports markets)" else "No open sports markets")
+            deduped
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: IOException) {
-            setStatus(PROVIDER_KALSHI, "Network error: ${sanitizeError(e)}")
+            setStatus(PROVIDER_KALSHI, SyncRepository.friendlyNetworkError(e))
             emptyList()
         } catch (e: Exception) {
             setStatus(PROVIDER_KALSHI, "Parse error: ${sanitizeError(e)}")
@@ -579,7 +743,42 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    fun fetchOddsPapiFixtures(apiKey: String): List<JsonObject> {
+    internal fun parseKalshiMarketsPayload(body: String, requireSportsFilter: Boolean): List<Pair<String, Double>> {
+        val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: return emptyList()
+        val markets = root.arrayOrNull("markets") ?: return emptyList()
+        val pairs = mutableListOf<Pair<String, Double>>()
+        for (marketElem in markets) {
+            val marketObj = marketElem as? JsonObject ?: continue
+            val title = marketObj.stringOrNull("title")?.takeIf { it.isNotBlank() }
+                ?: marketObj.stringOrNull("ticker").orEmpty()
+            if (title.isBlank()) continue
+            val subtitle = marketObj.stringOrNull("yes_sub_title")?.takeIf { it.isNotBlank() }
+                ?: marketObj.stringOrNull("subtitle")?.takeIf { it.isNotBlank() }
+            if (requireSportsFilter) {
+                val meta = listOfNotNull(
+                    marketObj.stringOrNull("category"),
+                    marketObj.stringOrNull("event_ticker"),
+                    marketObj.stringOrNull("series_ticker"),
+                    subtitle,
+                ).joinToString(" ")
+                if (!isSportsMarketQuestion(title, meta)) continue
+            } else if (isBlockedNonSportsMarket(title)) {
+                continue
+            }
+            val yesProb = extractKalshiYesProbability(marketObj) ?: continue
+            if (yesProb.isFinite() && yesProb in 0.01..0.99) {
+                val display = if (!subtitle.isNullOrBlank() && !title.contains(subtitle, ignoreCase = true)) {
+                    "${title.trim()} ($subtitle)"
+                } else {
+                    title.trim()
+                }
+                pairs.add(display to yesProb)
+            }
+        }
+        return pairs
+    }
+
+    suspend fun fetchOddsPapiFixtures(apiKey: String): List<JsonObject> {
         val cleanKey = sanitizeKey(apiKey)
         if (cleanKey.isBlank()) {
             setStatus(PROVIDER_ODDSPAPI, "Not configured")
@@ -593,24 +792,23 @@ class OptionalOddsAndDataClient(
                 .addQueryParameter("apiKey", cleanKey)
                 .build()
 
-            val request = Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url(url)
                 .header("Accept", "application/json")
                 .get()
-                .build()
 
-            incrementCalls(PROVIDER_ODDSPAPI)
-            authClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    setStatus(PROVIDER_ODDSPAPI, "HTTP ${response.code}")
-                    return emptyList()
-                }
-
-                val body = readBoundedBody(response)
-                if (body.isBlank()) {
-                    setStatus(PROVIDER_ODDSPAPI, "Empty response")
-                    return emptyList()
-                }
+            val cachedRes = executeCachedGet(
+                cacheKey = "oddspapi:fixtures",
+                provider = PROVIDER_ODDSPAPI,
+                requestBuilder = requestBuilder,
+                ttlMs = TTL_12_HOURS_MS,
+                windowKey = currentMonthlyWindow(),
+                hardLimit = 220,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            run {
 
                 val parsed = json.parseToJsonElement(body)
                 val fixtures = when (parsed) {
@@ -636,7 +834,7 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    fun fetchApiSportsJson(
+    suspend fun fetchApiSportsJson(
         apiKey: String,
         endpointUrl: String = "https://v3.football.api-sports.io/status",
     ): JsonObject? {
@@ -653,25 +851,24 @@ class OptionalOddsAndDataClient(
         }
 
         return try {
-            val request = Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url(parsedUrl)
                 .header("x-apisports-key", cleanKey)
                 .header("Accept", "application/json")
                 .get()
-                .build()
 
-            incrementCalls(PROVIDER_API_SPORTS)
-            authClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    setStatus(PROVIDER_API_SPORTS, "HTTP ${response.code}")
-                    return null
-                }
-
-                val body = readBoundedBody(response)
-                if (body.isBlank()) {
-                    setStatus(PROVIDER_API_SPORTS, "Empty response")
-                    return null
-                }
+            val cachedRes = executeCachedGet(
+                cacheKey = "api_sports:${parsedUrl.host}:${parsedUrl.encodedPath}",
+                provider = PROVIDER_API_SPORTS,
+                requestBuilder = requestBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 85,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return null
+            run {
 
                 val obj = json.parseToJsonElement(body) as? JsonObject
                 setStatus(PROVIDER_API_SPORTS, if (obj != null) "OK" else "Unexpected JSON payload")
@@ -688,25 +885,39 @@ class OptionalOddsAndDataClient(
         }
     }
 
-    fun getQuotaSummary(keys: UserApiKeys): List<ProviderQuotaStatus> = listOf(
-        buildQuotaStatus(PROVIDER_THE_ODDS_API, "500 credits/mo", keys.theOddsApiKey.isNotBlank()),
-        buildQuotaStatus(PROVIDER_FOOTBALL_DATA, "10 calls/min (Free Forever)", keys.footballDataOrgKey.isNotBlank()),
-        buildQuotaStatus(PROVIDER_ODDSPAPI, "250 req/mo", keys.oddsPapiKey.isNotBlank()),
-        buildQuotaStatus(PROVIDER_CRICKET_DATA, "100 hits/day", keys.cricketDataKey.isNotBlank()),
-        buildQuotaStatus(PROVIDER_API_SPORTS, "100 req/day per sport", keys.apiSportsKey.isNotBlank()),
-        buildQuotaStatus(PROVIDER_POLYMARKET, "Keyless (~300 req/10s)", keys.enablePolymarket),
-        buildQuotaStatus(PROVIDER_KALSHI, "Keyless (public REST)", keys.enableKalshi),
-    )
+    fun getQuotaSummary(
+        keys: UserApiKeys,
+        persistedQuotas: List<ApiQuotaEntity> = emptyList(),
+    ): List<ProviderQuotaStatus> {
+        val byProvider = persistedQuotas.associateBy { it.provider }
+        return listOf(
+            buildQuotaStatus(PROVIDER_THE_ODDS_API, "500/mo (6h cache)", keys.theOddsApiKey.isNotBlank(), byProvider[PROVIDER_THE_ODDS_API]),
+            buildQuotaStatus(PROVIDER_FOOTBALL_DATA, "10/min (6h cache)", keys.footballDataOrgKey.isNotBlank(), byProvider[PROVIDER_FOOTBALL_DATA]),
+            buildQuotaStatus(PROVIDER_ODDSPAPI, "250/mo (12h cache)", keys.oddsPapiKey.isNotBlank(), byProvider[PROVIDER_ODDSPAPI]),
+            buildQuotaStatus(PROVIDER_CRICKET_DATA, "100/day (6h cache)", keys.cricketDataKey.isNotBlank(), byProvider[PROVIDER_CRICKET_DATA]),
+            buildQuotaStatus(PROVIDER_API_SPORTS, "100/day (6h cache)", keys.apiSportsKey.isNotBlank(), byProvider[PROVIDER_API_SPORTS]),
+            buildQuotaStatus(PROVIDER_POLYMARKET, "Keyless (public)", keys.enablePolymarket, byProvider[PROVIDER_POLYMARKET]),
+            buildQuotaStatus(PROVIDER_KALSHI, "Keyless (public)", keys.enableKalshi, byProvider[PROVIDER_KALSHI]),
+        )
+    }
 
-    private fun buildQuotaStatus(provider: String, freeLimitLabel: String, configured: Boolean): ProviderQuotaStatus {
-        val calls = callsByProvider[provider]?.get() ?: 0
-        val defaultStatus = if (configured) "Ready" else "Disabled / No key"
+    private fun buildQuotaStatus(
+        provider: String,
+        freeLimitLabel: String,
+        configured: Boolean,
+        persisted: ApiQuotaEntity?,
+    ): ProviderQuotaStatus {
+        val calls = maxOf(callsByProvider[provider]?.get() ?: 0, persisted?.callsUsed ?: 0)
+        val defaultStatus = if (configured) "Ready (cached)" else "Not configured"
+        val resolvedStatus = statusByProvider[provider]
+            ?: persisted?.lastStatus?.takeIf { it.isNotBlank() }
+            ?: defaultStatus
         return ProviderQuotaStatus(
             provider = provider,
             callsUsed = calls,
             freeLimitLabel = freeLimitLabel,
             configured = configured,
-            lastStatus = statusByProvider[provider] ?: defaultStatus,
+            lastStatus = resolvedStatus,
         )
     }
 
@@ -741,7 +952,19 @@ class OptionalOddsAndDataClient(
      * Kalshi v2 returns integer cents (0..100) for `yes_bid`, `yes_ask`, `last_price`.
      * Require an active, reasonably tight two-sided quote (`yesBid > 0 && yesAsk > 0 && spread <= 20c`).
      */
-    private fun extractKalshiYesProbability(marketObj: JsonObject): Double? {
+    internal fun extractKalshiYesProbability(marketObj: JsonObject): Double? {
+        // March 2026 Kalshi v2 fixed-point dollar strings (0.0000..1.0000)
+        val bidD = marketObj.dollarOrNull("yes_bid_dollars")
+        val askD = marketObj.dollarOrNull("yes_ask_dollars")
+        if (bidD != null && askD != null && bidD > 0.0 && askD > 0.0 && (askD - bidD) in 0.0..0.25) {
+            return ((bidD + askD) / 2.0).coerceIn(0.01, 0.99)
+        }
+        val lastD = marketObj.dollarOrNull("last_price_dollars")
+            ?: marketObj.dollarOrNull("yes_price_dollars")
+        if (lastD != null && lastD in 0.01..0.99) return lastD
+        if (bidD != null && bidD in 0.01..0.99) return bidD
+
+        // Legacy integer-cent fallback (1..99)
         val yesBid = marketObj.doubleOrNull("yes_bid")?.takeIf { it.isFinite() }
         val yesAsk = marketObj.doubleOrNull("yes_ask")?.takeIf { it.isFinite() }
         if (yesBid != null && yesAsk != null && yesBid > 0.0 && yesAsk > 0.0 && (yesAsk - yesBid) in 0.0..20.0) {
@@ -749,6 +972,11 @@ class OptionalOddsAndDataClient(
         }
         val lastPrice = marketObj.doubleOrNull("last_price")?.takeIf { it.isFinite() && it in 1.0..99.0 } ?: return null
         return lastPrice / 100.0
+    }
+
+    private fun JsonObject.dollarOrNull(key: String): Double? {
+        val prim = this[key] as? JsonPrimitive ?: return null
+        return (prim.doubleOrNull ?: prim.contentOrNull?.trim()?.toDoubleOrNull())?.takeIf { it.isFinite() }
     }
 
     private fun parseStringOrJsonArray(element: JsonElement?): List<String> {
@@ -801,8 +1029,7 @@ class OptionalOddsAndDataClient(
         val blocked = listOf(
             "trump", "biden", "xi jinping", "democrat", "republican", "election", "president",
             "senate", "congress", "governor", "nominee", "primary", "fed ", "interest rate",
-            "tariff", "bitcoin", "btc", "ethereum", "crypto", "inflation", "recession", "ukraine",
-            "china", "israel", "gaza", "nato", "supreme court", "cabinet", "pardon", "oscar", "grammy",
+            "tariff", "bitcoin", "btc", "ethereum", "crypto", "inflation", "recession", "ceasefire", "gaza", "nato", "supreme court", "cabinet", "pardon", "oscar", "grammy",
             "cpi", "gdp", "unemployment", "s&p", "nasdaq", "box office", "temperature",
         )
         return blocked.any { it in q }
@@ -833,6 +1060,13 @@ class OptionalOddsAndDataClient(
         const val PROVIDER_API_SPORTS = "API-Sports"
         const val PROVIDER_POLYMARKET = "Polymarket"
         const val PROVIDER_KALSHI = "Kalshi"
+        const val TTL_30_MIN_MS = 30L * 60_000L
+        const val TTL_6_HOURS_MS = 6L * 3_600_000L
+        private val KALSHI_SPORTS_SERIES = listOf(
+            "KXNFLGAME", "KXNBAGAME", "KXNHLGAME", "KXMLBGAME",
+            "KXEPLGAME", "KXUCLGAME", "KXUFCFIGHT",
+        )
+        const val TTL_12_HOURS_MS = 12L * 3_600_000L
 
         private val SHARP_BOOK_KEYS = setOf(
             "pinnacle",

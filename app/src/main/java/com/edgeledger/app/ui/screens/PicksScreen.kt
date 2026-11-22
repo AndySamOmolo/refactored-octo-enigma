@@ -3,7 +3,9 @@ package com.edgeledger.app.ui.screens
 import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,6 +43,7 @@ import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.ui.components.MetricTile
 import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatusBadge
+import com.edgeledger.app.ui.components.SegmentedTabs
 import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.scaledSp
 import kotlinx.coroutines.launch
@@ -188,7 +191,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
     ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("My Saved Picks", color = c.text, fontSize = scaledSp(20f), fontWeight = FontWeight.ExtraBold)
+                Text("My Saved Picks", color = c.text, fontSize = scaledSp(19f), fontWeight = FontWeight.ExtraBold)
                 Text("Switch between Real Balance and Paper-Trading shadow bankroll to test strategies.", color = c.textMuted, fontSize = scaledSp(12.5f))
             }
         }
@@ -213,15 +216,15 @@ fun PicksScreen(app: EdgeLedgerApp) {
         }
 
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricTile(if (isPaper) "Paper Bal" else "Balance", "$${(baseBalance + netPnl).roundToInt()}", null, Modifier.weight(1f))
+            Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricTile(if (isPaper) "Paper Bal" else "Balance", "$${(baseBalance + netPnl).roundToInt()}", null, Modifier.weight(1f).fillMaxHeight())
                 MetricTile(
                     "Total Profit",
                     if (netPnl >= 0) "+$${netPnl.roundToInt()}" else "-$${kotlin.math.abs(netPnl.roundToInt())}",
                     avgClv?.let { "CLV ${if (it >= 0) "+" else ""}${String.format(Locale.US, "%.1f", it)}%" },
                     Modifier.weight(1f),
                 )
-                MetricTile("Win Rate", "$winRate%", "$won/$settled settled", Modifier.weight(1f))
+                MetricTile("Win Rate", "$winRate%", "$won/$settled settled", Modifier.weight(1f).fillMaxHeight())
             }
         }
 
@@ -362,7 +365,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
             }
         }
 
-        item { Spacer(Modifier.height(88.dp)) }
+        item { Spacer(Modifier.height(16.dp)) }
     }
 
     if (showResetPaperConfirm) {

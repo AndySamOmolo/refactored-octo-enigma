@@ -3,6 +3,9 @@ package com.edgeledger.app
 import androidx.compose.ui.graphics.Color
 import com.edgeledger.app.data.OddsHistoryEntity
 import com.edgeledger.app.data.OptionalOddsAndDataClient
+import com.edgeledger.app.ui.screens.GamesFilterSort
+import com.edgeledger.app.ui.screens.GameSortMode
+import com.edgeledger.app.data.ApiQuotaEntity
 import com.edgeledger.app.data.SyncRepository
 import com.edgeledger.app.data.UserApiKeys
 import com.edgeledger.app.engine.CsvAndFeedParsers
@@ -365,5 +368,158 @@ class EdgeLedgerEngineTest {
         val darkTokens = resolveTokens(ThemeConfigV1(mode = ThemeMode.DARK))
         val deutTokens = resolveTokens(ThemeConfigV1(mode = ThemeMode.DEUTERANOPIA))
         assertTrue(darkTokens.colors.win != deutTokens.colors.win)
+    }
+
+    @Test
+    fun predictionHistoryAutoGradingHandlesAllMarkets() {
+        val (winStatus, winBrier) = SyncRepository.gradePredictionOutcome(
+            topPickLabel = "Arsenal to Win",
+            homeTeam = "Arsenal",
+            awayTeam = "Chelsea",
+            actualHomeScore = 2,
+            actualAwayScore = 1,
+            probHome = 0.65,
+            probDraw = 0.20,
+            probAway = 0.15,
+        )
+        assertEquals("WON", winStatus)
+        assertTrue(winBrier in 0.0..0.25)
+
+        val (bttsWin, _) = SyncRepository.gradePredictionOutcome(
+            topPickLabel = "Both Teams to Score",
+            homeTeam = "Arsenal",
+            awayTeam = "Chelsea",
+            actualHomeScore = 2,
+            actualAwayScore = 1,
+            probHome = 0.50,
+            probDraw = 0.25,
+            probAway = 0.25,
+        )
+        assertEquals("WON", bttsWin)
+
+        val (underLoss, _) = SyncRepository.gradePredictionOutcome(
+            topPickLabel = "Under 2.5 Goals",
+            homeTeam = "Arsenal",
+            awayTeam = "Chelsea",
+            actualHomeScore = 2,
+            actualAwayScore = 1,
+            probHome = 0.50,
+            probDraw = 0.25,
+            probAway = 0.25,
+        )
+        assertEquals("LOST", underLoss)
+    }
+
+    @Test
+    fun gamesFilterSortOrdersByBttsOverUnderAndDraw() {
+        val mHighBtts = PredictionEngine.predictAllMarkets(Sport.FOOTBALL, "Liverpool", "Man City", null, null)
+            .copy(bttsYesPct = 76, over25Pct = 74, probDraw = 0.20)
+        val mLowBtts = PredictionEngine.predictAllMarkets(Sport.FOOTBALL, "Getafe", "Cadiz", null, null)
+            .copy(bttsYesPct = 38, over25Pct = 32, probDraw = 0.34)
+        val fxHigh = com.edgeledger.app.model.MatchFixture(
+            id = "fx1", sport = Sport.FOOTBALL, leagueId = "E0", leagueName = "Premier League",
+            kickoffIso = "2026-11-23T15:00:00Z", homeTeam = "Liverpool", awayTeam = "Man City", markets = mHighBtts,
+        )
+        val fxLow = com.edgeledger.app.model.MatchFixture(
+            id = "fx2", sport = Sport.FOOTBALL, leagueId = "SP1", leagueName = "La Liga",
+            kickoffIso = "2026-11-23T17:00:00Z", homeTeam = "Getafe", awayTeam = "Cadiz", markets = mLowBtts,
+        )
+
+        val byBtts = GamesFilterSort.sortFixtures(listOf(fxLow, fxHigh), GameSortMode.BTTS_HIGH) { 50 to 50 }
+        assertEquals("fx1", byBtts.first().id)
+
+        val byUnder25 = GamesFilterSort.sortFixtures(listOf(fxHigh, fxLow), GameSortMode.UNDER_25_HIGH) { 50 to 50 }
+        assertEquals("fx2", byUnder25.first().id)
+
+        val byDraw = GamesFilterSort.sortFixtures(listOf(fxHigh, fxLow), GameSortMode.DRAW_HIGH) { 50 to 50 }
+        assertEquals("fx2", byDraw.first().id)
+    }
+
+    @Test
+    fun apiQuotaSummaryMergesPersistedRoomUsage() {
+        val client = OptionalOddsAndDataClient(OkHttpClient())
+        val persisted = listOf(
+            ApiQuotaEntity(
+                provider = OptionalOddsAndDataClient.PROVIDER_THE_ODDS_API,
+                windowKey = "2026-11",
+                callsUsed = 42,
+                serverRemaining = 458,
+                hardLimit = 450,
+                lastStatus = "Cached (240m TTL left)",
+                cooldownUntilEpochMs = 0L,
+                updatedAtEpochMs = 1_700_000_000_000L,
+            )
+        )
+        val summary = client.getQuotaSummary(UserApiKeys(theOddsApiKey = "testkey123"), persisted)
+        val oddsRow = summary.first { it.provider == OptionalOddsAndDataClient.PROVIDER_THE_ODDS_API }
+        assertEquals(42, oddsRow.callsUsed)
+        assertTrue(oddsRow.lastStatus.contains("Cached"))
+    }
+
+    @Test
+    fun kalshi2026DollarFieldsAndPolymarketEventsParseCleanly() {
+        val client = OptionalOddsAndDataClient(OkHttpClient())
+
+        // Kalshi March 2026 fixed-point dollar strings (yes_bid_dollars / yes_ask_dollars)
+        val kalshiJson = """
+            {"markets":[
+                {"ticker":"KXNFLGAME-26NOV22-KC","title":"Will Kansas City win?","yes_sub_title":"Chiefs","yes_bid_dollars":"0.6200","yes_ask_dollars":"0.6600"}
+            ]}
+        """.trimIndent()
+        val kalshiParsed = client.parseKalshiMarketsPayload(kalshiJson, requireSportsFilter = false)
+        assertEquals(1, kalshiParsed.size)
+        assertTrue(kalshiParsed[0].second in 0.63..0.65)
+        assertTrue(kalshiParsed[0].first.contains("Chiefs"))
+
+        // Polymarket /events nested markets[] with team-vs-team outcomes
+        val polyJson = """
+            [{"title":"Arsenal vs Chelsea","markets":[
+                {"question":"Arsenal vs Chelsea","closed":false,"outcomes":"["Arsenal","Chelsea"]","outcomePrices":"["0.58","0.42"]"}
+            ]}]
+        """.trimIndent()
+        val polyParsed = client.parsePolymarketEventsPayload(polyJson)
+        assertEquals(1, polyParsed.size)
+        assertTrue(polyParsed[0].first.contains("Arsenal"))
+        assertTrue(polyParsed[0].second in 0.57..0.59)
+    }
+
+    @Test
+    fun newKeylessParsersHandleJolpicaMlbNhlTennisAndCricket() {
+        val jolpicaJson = """
+            {"MRData":{"StandingsTable":{"StandingsLists":[{"DriverStandings":[
+                {"points":"395","wins":"8","Driver":{"givenName":"Max","familyName":"Verstappen"}},
+                {"points":"330","wins":"4","Driver":{"givenName":"Lando","familyName":"Norris"}}
+            ]}]}}}
+        """.trimIndent()
+        val f1Profiles = CsvAndFeedParsers.parseJolpicaF1Standings(jolpicaJson)
+        assertEquals(2, f1Profiles.size)
+        assertTrue((f1Profiles["Max Verstappen"]?.powerScore ?: 0) > (f1Profiles["Lando Norris"]?.powerScore ?: 0))
+
+        val mlbJson = """
+            {"records":[{"teamRecords":[{"team":{"id":119,"name":"Los Angeles Dodgers"},"wins":98,"losses":64,"runsScored":842,"runsAllowed":686}]}]}
+        """.trimIndent()
+        val mlbProfiles = CsvAndFeedParsers.parseMlbStandings(mlbJson)
+        assertEquals(1, mlbProfiles.size)
+        assertTrue((mlbProfiles["Los Angeles Dodgers"]?.elo ?: 0.0) > 1550.0)
+
+        val nhlJson = """
+            {"gameWeek":[{"date":"2026-11-21","games":[
+                {"id":2026020301,"gameState":"FINAL","startTimeUTC":"2026-11-21T23:00:00Z",
+                 "homeTeam":{"abbrev":"TOR","placeName":{"default":"Toronto"},"commonName":{"default":"Maple Leafs"},"score":4},
+                 "awayTeam":{"abbrev":"MTL","placeName":{"default":"Montreal"},"commonName":{"default":"Canadiens"},"score":2}}
+            ]}]}
+        """.trimIndent()
+        val nhlHist = CsvAndFeedParsers.parseNhlCompletedGames(nhlJson)
+        assertEquals(1, nhlHist.size)
+        assertEquals(4, nhlHist[0].homeScore)
+
+        val cricJson = """
+            {"matches":[{"objectId":"9991","state":"PRE","startTime":"2026-11-23T09:00:00Z",
+             "series":{"name":"The Ashes"},"ground":{"smallName":"MCG"},
+             "teams":[{"team":{"longName":"Australia"}},{"team":{"longName":"England"}}]}]}
+        """.trimIndent()
+        val cricEvents = CsvAndFeedParsers.parseEspnCricinfoCurrent(cricJson)
+        assertEquals(1, cricEvents.size)
+        assertEquals("Australia", cricEvents[0].homeTeam)
     }
 }

@@ -51,7 +51,7 @@ jobs:
             chmod 600 "${RUNNER_TEMP}/release.keystore"
             echo "RELEASE_STORE_FILE=${RUNNER_TEMP}/release.keystore" >> "$GITHUB_ENV"
           else
-            echo "::warning::ANDROID_KEYSTORE_BASE64 secret is not configured; signing personal sideload APK with runner debug keystore."
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set. Using ephemeral debug keystore (in-place APK updates require setting ANDROID_KEYSTORE_BASE64/PASSWORD/ALIAS/KEY_PASSWORD secrets)."
           fi
 
       - name: Run JUnit 4 tests, Lint & build Native Release APK

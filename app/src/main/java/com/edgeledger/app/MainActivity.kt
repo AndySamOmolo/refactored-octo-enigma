@@ -10,6 +10,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.outlined.EmojiEvents
 import androidx.compose.material.icons.outlined.QueryStats
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -111,6 +113,8 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
             containerColor = Color.Transparent,
             bottomBar = {
                 if (showBottomBar) {
+                    Column {
+                    HorizontalDivider(thickness = 0.75.dp, color = c.border)
                     NavigationBar(
                         containerColor = c.surface,
                         contentColor = c.text,
@@ -175,6 +179,7 @@ private fun EdgeLedgerRoot(app: EdgeLedgerApp) {
                                 ),
                             )
                         }
+                    }
                     }
                 }
             },

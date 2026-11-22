@@ -89,6 +89,82 @@ data class OddsHistoryEntity(
     val retailHomeProbPct: Double?,
 )
 
+/**
+ * Permanent append-only ledger of pre-kickoff model predictions (never deleted/pruned).
+ * Auto-snapshotted before kickoff and auto-graded once actual final scores arrive.
+ */
+@Entity(
+    tableName = "prediction_history",
+    indices = [
+        Index(value = ["kickoffEpochMs"]),
+        Index(value = ["resultStatus"]),
+        Index(value = ["sport", "leagueId"]),
+    ],
+)
+data class PredictionHistoryEntity(
+    @PrimaryKey val fixtureId: String,
+    val sport: String,
+    val leagueId: String,
+    val leagueName: String,
+    val kickoffIso: String,
+    val kickoffEpochMs: Long,
+    val homeTeam: String,
+    val awayTeam: String,
+    val topPickLabel: String,
+    val topPickCategory: String,
+    val topPickChancePct: Int,
+    val probHome: Double,
+    val probDraw: Double,
+    val probAway: Double,
+    val over25Pct: Int,
+    val bttsYesPct: Int,
+    val projectedHome: Double,
+    val projectedAway: Double,
+    val bestValueLabel: String? = null,
+    val bestValueEdgePct: Double? = null,
+    val modelVersion: String,
+    val hashSha256: String,
+    val lockedAtEpochMs: Long,
+    val actualHomeScore: Int? = null,
+    val actualAwayScore: Int? = null,
+    val resultStatus: String = "PENDING", // PENDING, WON, LOST, PUSH
+    val brierScore: Double? = null,
+    val gradedAtEpochMs: Long? = null,
+)
+
+/**
+ * Persistent TTL + ETag response cache for API-keyed sports providers so repeated syncs
+ * never waste free-tier request quotas or trigger HTTP 429 rate limits.
+ */
+@Entity(
+    tableName = "api_response_cache",
+    indices = [Index(value = ["provider", "expiresAtEpochMs"])],
+)
+data class ApiResponseCacheEntity(
+    @PrimaryKey val cacheKey: String,
+    val provider: String,
+    val payloadJson: String,
+    val fetchedAtEpochMs: Long,
+    val expiresAtEpochMs: Long,
+    val httpStatus: Int,
+    val etag: String? = null,
+)
+
+/**
+ * Persistent per-provider rate-limit & free-tier quota ledger across app restarts.
+ */
+@Entity(tableName = "api_quota_ledger")
+data class ApiQuotaEntity(
+    @PrimaryKey val provider: String,
+    val windowKey: String,
+    val callsUsed: Int,
+    val serverRemaining: Int? = null,
+    val hardLimit: Int,
+    val lastStatus: String,
+    val cooldownUntilEpochMs: Long = 0L,
+    val updatedAtEpochMs: Long = 0L,
+)
+
 @Dao
 interface EdgeLedgerDao {
     @Query("SELECT * FROM app_snapshot WHERE id = 1")
@@ -129,6 +205,55 @@ interface EdgeLedgerDao {
 
     @Query("DELETE FROM odds_history WHERE recordedAtEpochMs < :cutoffEpochMs")
     suspend fun pruneOldOddsHistory(cutoffEpochMs: Long)
+
+    // Permanent append-only prediction history (no DELETE method by design)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertPredictionHistory(entries: List<PredictionHistoryEntity>)
+
+    @Query("SELECT * FROM prediction_history WHERE resultStatus = 'PENDING' AND kickoffEpochMs > 0 AND kickoffEpochMs <= :cutoffEpochMs")
+    suspend fun getPendingPredictionsPastKickoff(cutoffEpochMs: Long): List<PredictionHistoryEntity>
+
+    @Query(
+        """
+        UPDATE prediction_history
+        SET actualHomeScore = :homeScore,
+            actualAwayScore = :awayScore,
+            resultStatus = :status,
+            brierScore = :brier,
+            gradedAtEpochMs = :gradedAtMs
+        WHERE fixtureId = :fixtureId AND resultStatus = 'PENDING'
+        """
+    )
+    suspend fun gradePrediction(
+        fixtureId: String,
+        homeScore: Int,
+        awayScore: Int,
+        status: String,
+        brier: Double,
+        gradedAtMs: Long,
+    )
+
+    @Query("SELECT * FROM prediction_history ORDER BY kickoffEpochMs DESC, lockedAtEpochMs DESC")
+    fun observePredictionHistory(): Flow<List<PredictionHistoryEntity>>
+
+    // Persistent API response cache & quota ledger
+    @Query("SELECT * FROM api_response_cache WHERE cacheKey = :key")
+    suspend fun getApiCache(key: String): ApiResponseCacheEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putApiCache(entry: ApiResponseCacheEntity)
+
+    @Query("DELETE FROM api_response_cache WHERE expiresAtEpochMs < :cutoffEpochMs")
+    suspend fun pruneExpiredApiCache(cutoffEpochMs: Long)
+
+    @Query("SELECT * FROM api_quota_ledger WHERE provider = :provider")
+    suspend fun getApiQuota(provider: String): ApiQuotaEntity?
+
+    @Query("SELECT * FROM api_quota_ledger ORDER BY provider ASC")
+    fun observeApiQuotas(): Flow<List<ApiQuotaEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertApiQuota(entry: ApiQuotaEntity)
 }
 
 @Database(
@@ -137,8 +262,11 @@ interface EdgeLedgerDao {
         LockedPickEntity::class,
         PersonalBetEntity::class,
         OddsHistoryEntity::class,
+        PredictionHistoryEntity::class,
+        ApiResponseCacheEntity::class,
+        ApiQuotaEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -260,6 +388,84 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP INDEX IF EXISTS `index_odds_history_fixtureId`")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_odds_history_recordedAtEpochMs` ON `odds_history` (`recordedAtEpochMs`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `prediction_history` (
+                        `fixtureId` TEXT NOT NULL,
+                        `sport` TEXT NOT NULL,
+                        `leagueId` TEXT NOT NULL,
+                        `leagueName` TEXT NOT NULL,
+                        `kickoffIso` TEXT NOT NULL,
+                        `kickoffEpochMs` INTEGER NOT NULL,
+                        `homeTeam` TEXT NOT NULL,
+                        `awayTeam` TEXT NOT NULL,
+                        `topPickLabel` TEXT NOT NULL,
+                        `topPickCategory` TEXT NOT NULL,
+                        `topPickChancePct` INTEGER NOT NULL,
+                        `probHome` REAL NOT NULL,
+                        `probDraw` REAL NOT NULL,
+                        `probAway` REAL NOT NULL,
+                        `over25Pct` INTEGER NOT NULL,
+                        `bttsYesPct` INTEGER NOT NULL,
+                        `projectedHome` REAL NOT NULL,
+                        `projectedAway` REAL NOT NULL,
+                        `bestValueLabel` TEXT,
+                        `bestValueEdgePct` REAL,
+                        `modelVersion` TEXT NOT NULL,
+                        `hashSha256` TEXT NOT NULL,
+                        `lockedAtEpochMs` INTEGER NOT NULL,
+                        `actualHomeScore` INTEGER,
+                        `actualAwayScore` INTEGER,
+                        `resultStatus` TEXT NOT NULL,
+                        `brierScore` REAL,
+                        `gradedAtEpochMs` INTEGER,
+                        PRIMARY KEY(`fixtureId`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_prediction_history_kickoffEpochMs` ON `prediction_history` (`kickoffEpochMs`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_prediction_history_resultStatus` ON `prediction_history` (`resultStatus`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_prediction_history_sport_leagueId` ON `prediction_history` (`sport`, `leagueId`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `api_response_cache` (
+                        `cacheKey` TEXT NOT NULL,
+                        `provider` TEXT NOT NULL,
+                        `payloadJson` TEXT NOT NULL,
+                        `fetchedAtEpochMs` INTEGER NOT NULL,
+                        `expiresAtEpochMs` INTEGER NOT NULL,
+                        `httpStatus` INTEGER NOT NULL,
+                        `etag` TEXT,
+                        PRIMARY KEY(`cacheKey`)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_api_response_cache_provider_expiresAtEpochMs` ON `api_response_cache` (`provider`, `expiresAtEpochMs`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `api_quota_ledger` (
+                        `provider` TEXT NOT NULL,
+                        `windowKey` TEXT NOT NULL,
+                        `callsUsed` INTEGER NOT NULL,
+                        `serverRemaining` INTEGER,
+                        `hardLimit` INTEGER NOT NULL,
+                        `lastStatus` TEXT NOT NULL,
+                        `cooldownUntilEpochMs` INTEGER NOT NULL,
+                        `updatedAtEpochMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`provider`)
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -267,7 +473,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "edgeledger_offline.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
                     .also { INSTANCE = it }
             }

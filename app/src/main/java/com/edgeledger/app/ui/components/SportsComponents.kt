@@ -236,7 +236,7 @@ fun shortTeamName(fullName: String): String {
 fun tabularStyle(sizeSp: Float, weight: FontWeight = FontWeight.Bold, color: Color = AppTheme.tokens.colors.text): TextStyle {
     val scale = AppTheme.tokens.fontScale
     return TextStyle(
-        fontSize = (sizeSp * scale).coerceAtLeast(11.5f).sp,
+        fontSize = (sizeSp * scale).coerceAtLeast(10f).sp,
         fontWeight = weight,
         color = color,
         fontFeatureSettings = "tnum",
@@ -244,7 +244,7 @@ fun tabularStyle(sizeSp: Float, weight: FontWeight = FontWeight.Bold, color: Col
 }
 
 @Composable
-fun scaledSp(baseSp: Float) = (baseSp * AppTheme.tokens.fontScale).coerceAtLeast(11.5f).sp
+fun scaledSp(baseSp: Float) = (baseSp * AppTheme.tokens.fontScale).coerceAtLeast(10f).sp
 
 fun formatLocalKickoff(kickoffIso: String): String = runCatching {
     val trimmed = kickoffIso.trim()
@@ -306,7 +306,7 @@ fun TokenPill(
 
     Surface(
         modifier = modifier
-            .defaultMinSize(minHeight = 48.dp)
+            .defaultMinSize(minHeight = 34.dp)
             .semantics { this.selected = selected }
             .clickable(role = Role.Tab) {
                 if (t.config.haptics != HapticLevel.OFF) {
@@ -316,18 +316,18 @@ fun TokenPill(
                 }
                 onClick()
             },
-        shape = t.shapes.chip,
+        shape = t.shapes.small,
         color = if (selected) activeContainer else c.surface,
         border = BorderStroke(
-            width = if (selected) 1.25.dp else 1.dp,
+            width = if (selected) 1.25.dp else 0.9.dp,
             color = if (selected) activeColor else c.border,
         ),
     ) {
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier.padding(
-                horizontal = t.spacing.chipHorizontalPadding,
-                vertical = t.spacing.chipVerticalPadding,
+                horizontal = 11.dp,
+                vertical = 6.dp,
             ),
         ) {
             Text(
@@ -339,6 +339,62 @@ fun TokenPill(
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+}
+
+
+@Composable
+fun SegmentedTabs(
+    tabs: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val t = AppTheme.tokens
+    val c = t.colors
+    val haptic = LocalHapticFeedback.current
+    Surface(
+        modifier = modifier.fillMaxWidth().height(38.dp),
+        shape = t.shapes.medium,
+        color = c.surfaceRaised,
+        border = BorderStroke(0.75.dp, c.border),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize().padding(3.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            tabs.forEachIndexed { idx, label ->
+                val isSelected = idx == selectedIndex
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .semantics { this.selected = isSelected }
+                        .clickable(role = Role.Tab) {
+                            if (t.config.haptics != HapticLevel.OFF) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            }
+                            onSelect(idx)
+                        },
+                    shape = t.shapes.small,
+                    color = if (isSelected) c.accentDim else Color.Transparent,
+                    border = if (isSelected) BorderStroke(1.dp, c.accent.copy(alpha = 0.7f)) else null,
+                ) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 4.dp)) {
+                        Text(
+                            text = label,
+                            color = if (isSelected) c.accent else c.textSecondary,
+                            fontSize = scaledSp(11.5f),
+                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -616,11 +672,12 @@ fun MetricTile(
     val t = AppTheme.tokens
     Column(
         modifier = modifier
+            .defaultMinSize(minHeight = 68.dp)
             .clip(t.shapes.medium)
             .background(t.colors.surfaceRaised)
-            .border(0.75.dp, t.colors.border.copy(alpha = 0.6f), t.shapes.medium)
-            .padding(11.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+            .border(t.borderWidthDp.coerceAtLeast(0.75.dp), t.colors.border.copy(alpha = 0.65f), t.shapes.medium)
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalArrangement = Arrangement.Center,
     ) {
         Text(title, color = t.colors.textSecondary, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(value, style = tabularStyle(17f, FontWeight.ExtraBold, t.colors.text), maxLines = 1)

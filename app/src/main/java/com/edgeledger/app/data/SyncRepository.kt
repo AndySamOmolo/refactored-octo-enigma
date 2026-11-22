@@ -26,6 +26,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -103,7 +104,9 @@ class SyncRepository(
         .callTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    private val optionalClient = OptionalOddsAndDataClient(client)
+    private val optionalClient = OptionalOddsAndDataClient(client, db.dao())
+    val predictionHistory: Flow<List<PredictionHistoryEntity>> = db.dao().observePredictionHistory()
+    val apiQuotas: Flow<List<ApiQuotaEntity>> = db.dao().observeApiQuotas()
     private val circuitStates = ConcurrentHashMap<String, CircuitState>()
     private val syncingLock = AtomicBoolean(false)
 
@@ -122,7 +125,114 @@ class SyncRepository(
     private val _providerQuotas = MutableStateFlow<List<ProviderQuotaStatus>>(emptyList())
     val providerQuotas: StateFlow<List<ProviderQuotaStatus>> = _providerQuotas.asStateFlow()
 
+    private suspend fun autoGradePendingPredictions(completedMatches: List<HistoricalMatch>, nowMs: Long) {
+        if (completedMatches.isEmpty()) return
+        val pending = db.dao().getPendingPredictionsPastKickoff(nowMs - 90L * 60_000L)
+        if (pending.isEmpty()) return
+
+        val byKey = completedMatches.groupBy {
+            "${it.sport.label.lowercase(Locale.ROOT)}|${it.homeTeam.trim().lowercase(Locale.ROOT)}|${it.awayTeam.trim().lowercase(Locale.ROOT)}"
+        }
+
+        for (entry in pending) {
+            val key = "${entry.sport.trim().lowercase(Locale.ROOT)}|${entry.homeTeam.trim().lowercase(Locale.ROOT)}|${entry.awayTeam.trim().lowercase(Locale.ROOT)}"
+            val candidates = byKey[key].orEmpty()
+            if (candidates.isEmpty()) continue
+
+            val kickoffDay = runCatching { LocalDate.parse(entry.kickoffIso.take(10)) }.getOrNull()
+            val matched = candidates.firstOrNull { m ->
+                val matchDay = runCatching { LocalDate.parse(m.dateIso.take(10)) }.getOrNull()
+                if (kickoffDay == null || matchDay == null) {
+                    true
+                } else {
+                    kotlin.math.abs(java.time.temporal.ChronoUnit.DAYS.between(kickoffDay, matchDay)) <= 2L
+                }
+            } ?: continue
+
+            val (status, brier) = gradePredictionOutcome(
+                topPickLabel = entry.topPickLabel,
+                homeTeam = entry.homeTeam,
+                awayTeam = entry.awayTeam,
+                actualHomeScore = matched.homeScore,
+                actualAwayScore = matched.awayScore,
+                probHome = entry.probHome,
+                probDraw = entry.probDraw,
+                probAway = entry.probAway,
+            )
+            db.dao().gradePrediction(
+                fixtureId = entry.fixtureId,
+                homeScore = matched.homeScore,
+                awayScore = matched.awayScore,
+                status = status,
+                brier = brier,
+                gradedAtMs = nowMs,
+            )
+        }
+    }
+
     companion object {
+        /**
+         * Pure deterministic grader for pre-kickoff predictions against actual final scores.
+         * Returns Pair(status: "WON"|"LOST"|"PUSH", brierScore: Double).
+         */
+        fun gradePredictionOutcome(
+            topPickLabel: String,
+            homeTeam: String,
+            awayTeam: String,
+            actualHomeScore: Int,
+            actualAwayScore: Int,
+            probHome: Double,
+            probDraw: Double,
+            probAway: Double,
+        ): Pair<String, Double> {
+            val yH = if (actualHomeScore > actualAwayScore) 1.0 else 0.0
+            val yD = if (actualHomeScore == actualAwayScore) 1.0 else 0.0
+            val yA = if (actualAwayScore > actualHomeScore) 1.0 else 0.0
+            val brier = if (probDraw > 0.001) {
+                ((probHome - yH) * (probHome - yH) + (probDraw - yD) * (probDraw - yD) + (probAway - yA) * (probAway - yA)) / 3.0
+            } else {
+                ((probHome - yH) * (probHome - yH) + (probAway - yA) * (probAway - yA)) / 2.0
+            }
+
+            val label = topPickLabel.trim().lowercase(Locale.ROOT)
+            val hLow = homeTeam.trim().lowercase(Locale.ROOT)
+            val aLow = awayTeam.trim().lowercase(Locale.ROOT)
+            val total = actualHomeScore + actualAwayScore
+            val bothScored = actualHomeScore > 0 && actualAwayScore > 0
+
+            val status = when {
+                "both teams to score" in label && "no" !in label -> if (bothScored) "WON" else "LOST"
+                "btts no" in label -> if (!bothScored) "WON" else "LOST"
+                "over 2.5" in label -> if (total >= 3) "WON" else "LOST"
+                "under 2.5" in label -> if (total <= 2) "WON" else "LOST"
+                "over 1.5" in label -> if (total >= 2) "WON" else "LOST"
+                "under 1.5" in label -> if (total <= 1) "WON" else "LOST"
+                "or draw" in label && hLow in label -> if (actualHomeScore >= actualAwayScore) "WON" else "LOST"
+                "or draw" in label && aLow in label -> if (actualAwayScore >= actualHomeScore) "WON" else "LOST"
+                label == "draw" || label.startsWith("draw ") -> if (actualHomeScore == actualAwayScore) "WON" else "LOST"
+                hLow in label && aLow !in label -> when {
+                    actualHomeScore > actualAwayScore -> "WON"
+                    actualHomeScore == actualAwayScore && probDraw <= 0.001 -> "PUSH"
+                    else -> "LOST"
+                }
+                aLow in label && hLow !in label -> when {
+                    actualAwayScore > actualHomeScore -> "WON"
+                    actualHomeScore == actualAwayScore && probDraw <= 0.001 -> "PUSH"
+                    else -> "LOST"
+                }
+                else -> {
+                    val pickedHome = probHome >= probAway && probHome >= probDraw
+                    val pickedAway = probAway > probHome && probAway >= probDraw
+                    when {
+                        pickedHome && actualHomeScore > actualAwayScore -> "WON"
+                        pickedAway && actualAwayScore > actualHomeScore -> "WON"
+                        !pickedHome && !pickedAway && actualHomeScore == actualAwayScore -> "WON"
+                        else -> "LOST"
+                    }
+                }
+            }
+            return status to brier
+        }
         private const val SNAPSHOT_FILE_NAME = "edgeledger_snapshot.json.gz"
         private const val SNAPSHOT_MARKER_FILE_BACKED = "FILE_BACKED"
         private const val MAX_BODY_BYTES = 15 * 1024 * 1024
@@ -224,6 +334,11 @@ class SyncRepository(
         _providerQuotas.value = optionalClient.getQuotaSummary(prefsRepo.apiKeys.value)
     }
 
+    fun getQuotaSummaryWithPersistence(
+        keys: UserApiKeys,
+        persisted: List<ApiQuotaEntity>,
+    ): List<ProviderQuotaStatus> = optionalClient.getQuotaSummary(keys, persisted)
+
     fun clearSyncError() {
         _syncError.value = null
     }
@@ -271,6 +386,48 @@ class SyncRepository(
             )
         }
 
+        val historyEntries = snap.fixtures.mapNotNull { fx ->
+            val top = fx.markets.topPicks.firstOrNull() ?: return@mapNotNull null
+            val kickoffMs = runCatching { java.time.OffsetDateTime.parse(fx.kickoffIso).toInstant().toEpochMilli() }.getOrNull()
+                ?: runCatching { Instant.parse(fx.kickoffIso).toEpochMilli() }.getOrNull()
+            // Strictly prospective: only record pre-kickoff predictions
+            if (kickoffMs != null && kickoffMs <= nowMs) return@mapNotNull null
+            val matchup = "${fx.homeTeam} vs ${fx.awayTeam}"
+            val hash = OddsMath.buildLockedPickHash(
+                fixtureId = fx.id,
+                matchup = matchup,
+                pickLabel = top.label,
+                chancePct = top.chancePct,
+                modelVersion = fx.markets.modelVersion,
+                lockedAtIso = nowIso,
+            )
+            PredictionHistoryEntity(
+                fixtureId = fx.id,
+                sport = fx.sport.label,
+                leagueId = fx.leagueId,
+                leagueName = fx.leagueName,
+                kickoffIso = fx.kickoffIso,
+                kickoffEpochMs = kickoffMs ?: nowMs,
+                homeTeam = fx.homeTeam,
+                awayTeam = fx.awayTeam,
+                topPickLabel = top.label,
+                topPickCategory = top.category,
+                topPickChancePct = top.chancePct,
+                probHome = fx.markets.probHome,
+                probDraw = fx.markets.probDraw,
+                probAway = fx.markets.probAway,
+                over25Pct = fx.markets.over25Pct,
+                bttsYesPct = fx.markets.bttsYesPct,
+                projectedHome = fx.markets.projectedHome,
+                projectedAway = fx.markets.projectedAway,
+                bestValueLabel = fx.bestValueLabel,
+                bestValueEdgePct = fx.bestValueEdgePct,
+                modelVersion = fx.markets.modelVersion,
+                hashSha256 = hash,
+                lockedAtEpochMs = nowMs,
+            )
+        }
+
         db.withTransaction {
             db.dao().saveSnapshot(
                 SnapshotEntity(
@@ -282,8 +439,10 @@ class SyncRepository(
                 )
             )
             if (locked.isNotEmpty()) db.dao().insertLockedPicks(locked)
+            if (historyEntries.isNotEmpty()) db.dao().insertPredictionHistory(historyEntries)
             if (oddsHistoryBatch.isNotEmpty()) db.dao().insertOddsHistory(oddsHistoryBatch)
             db.dao().pruneOldOddsHistory(nowMs - 30L * 24L * 3600L * 1000L)
+            db.dao().pruneExpiredApiCache(nowMs - 7L * 24L * 3600L * 1000L)
         }
     }
 
@@ -417,9 +576,14 @@ class SyncRepository(
                 val action: (String) -> Int,
             )
 
+            val espnDates = "${today.format(DateTimeFormatter.BASIC_ISO_DATE)}-${today.plusDays(6).format(DateTimeFormatter.BASIC_ISO_DATE)}"
             val feeds = listOf(
+                // Football-Data.co.uk (Top 5 + EFL Championship)
                 FeedSpec("fd-e0", "Football-Data.co.uk (Premier League)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/E0.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/E0.csv") { raw ->
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "E0"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-e1", "Football-Data.co.uk (Championship)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/E1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/E1.csv") { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "E1"); liveHistory.addAll(list); list.size
                 },
                 FeedSpec("fd-sp1", "Football-Data.co.uk (La Liga)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/SP1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/SP1.csv") { raw ->
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SP1"); liveHistory.addAll(list); list.size
@@ -433,57 +597,106 @@ class SyncRepository(
                 FeedSpec("fd-f1", "Football-Data.co.uk (Ligue 1)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/F1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/F1.csv") { raw ->
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "F1"); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "https://api.clubelo.com/$today", "http://api.clubelo.com/${today.minusDays(1)}") { raw ->
+                // ClubElo (HTTP-only official API; avoid TLS failure latency)
+                FeedSpec("clubelo", "ClubElo Global Ratings", Sport.FOOTBALL, "http://api.clubelo.com/$today", "http://api.clubelo.com/${today.minusDays(1)}") { raw ->
                     val map = CsvAndFeedParsers.parseClubEloCsv(raw); clubElo.putAll(map); map.size
                 },
-                FeedSpec("espn-epl", "ESPN Premier League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard") { raw ->
+                // ESPN Soccer Scoreboards (7-day rolling window across 9 top competitions)
+                FeedSpec("espn-epl", "ESPN Premier League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=$espnDates") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "E0", "Premier League")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-laliga", "ESPN La Liga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard") { raw ->
+                FeedSpec("espn-championship", "ESPN Championship", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.2/scoreboard?dates=$espnDates") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "E1", "Championship")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-laliga", "ESPN La Liga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=$espnDates") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "SP1", "La Liga")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-bundesliga", "ESPN Bundesliga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard") { raw ->
+                FeedSpec("espn-bundesliga", "ESPN Bundesliga", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=$espnDates") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "D1", "Bundesliga")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-seriea", "ESPN Serie A", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard") { raw ->
+                FeedSpec("espn-seriea", "ESPN Serie A", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=$espnDates") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "I1", "Serie A")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
-                FeedSpec("espn-ligue1", "ESPN Ligue 1", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard") { raw ->
+                FeedSpec("espn-ligue1", "ESPN Ligue 1", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard?dates=$espnDates") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "F1", "Ligue 1")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
+                FeedSpec("espn-ucl", "ESPN UEFA Champions League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=$espnDates") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "UCL", "Champions League")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-uel", "ESPN UEFA Europa League", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard?dates=$espnDates") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "UEL", "Europa League")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-mls", "ESPN MLS", Sport.FOOTBALL, "https://site.web.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=$espnDates") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "MLS", "MLS")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                // NFL (nflverse + ESPN Scoreboard + Standings)
                 FeedSpec("nflverse", "nflverse NFL Games CSV", Sport.NFL, "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv") { raw ->
                     val list = CsvAndFeedParsers.parseNflverseGamesCsv(raw, today.year - 1); liveHistory.addAll(list); list.size
                 },
-                FeedSpec("espn-nfl", "ESPN NFL Scoreboard", Sport.NFL, "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard") { raw ->
+                FeedSpec("espn-nfl", "ESPN NFL Scoreboard", Sport.NFL, "https://site.web.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=$espnDates") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NFL, "NFL", "NFL")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
                 FeedSpec("espn-nfl-standings", "ESPN NFL Standings", Sport.NFL, "https://site.web.api.espn.com/apis/v2/sports/football/nfl/standings", "https://site.api.espn.com/apis/v2/sports/football/nfl/standings") { raw ->
                     val map = CsvAndFeedParsers.parseEspnNflStandings(raw); liveStandingsProfiles.putAll(map); map.size
                 },
-                FeedSpec("espn-nba", "ESPN NBA Scoreboard", Sport.NBA, "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard") { raw ->
+                // NBA (ESPN 7-day Scoreboard + Standings)
+                FeedSpec("espn-nba", "ESPN NBA Scoreboard", Sport.NBA, "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=$espnDates") { raw ->
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NBA, "NBA", "NBA")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
                 FeedSpec("espn-nba-standings", "ESPN NBA Standings", Sport.NBA, "https://site.web.api.espn.com/apis/v2/sports/basketball/nba/standings", "https://site.api.espn.com/apis/v2/sports/basketball/nba/standings") { raw ->
                     val map = CsvAndFeedParsers.parseEspnNbaStandings(raw); liveStandingsProfiles.putAll(map); map.size
                 },
+                // Official NHL Web API (Schedule: upcoming + completed history, plus Standings)
                 FeedSpec("nhl-api", "Official NHL Web API", Sport.NHL, "https://api-web.nhle.com/v1/schedule/now") { raw ->
-                    val u = CsvAndFeedParsers.parseNhlSchedule(raw); liveUpcoming.addAll(u); u.size
+                    val u = CsvAndFeedParsers.parseNhlSchedule(raw)
+                    val h = CsvAndFeedParsers.parseNhlCompletedGames(raw)
+                    liveUpcoming.addAll(u); liveHistory.addAll(h); u.size + h.size
                 },
                 FeedSpec("nhl-standings", "Official NHL Standings", Sport.NHL, "https://api-web.nhle.com/v1/standings/now") { raw ->
                     val map = CsvAndFeedParsers.parseNhlStandings(raw); liveStandingsProfiles.putAll(map); map.size
                 },
+                // Official MLB Stats API (Schedule + Standings)
                 FeedSpec("mlb-api", "Official MLB Stats API", Sport.MLB, "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=$today&endDate=${today.plusDays(6)}") { raw ->
                     val u = CsvAndFeedParsers.parseMlbSchedule(raw); liveUpcoming.addAll(u); u.size
                 },
+                FeedSpec("mlb-standings", "Official MLB Standings", Sport.MLB, "https://statsapi.mlb.com/api/v1/standings?leagueId=103,104&season=${today.year}") { raw ->
+                    val map = CsvAndFeedParsers.parseMlbStandings(raw); liveStandingsProfiles.putAll(map); map.size
+                },
+                // Tennis (TennisMyLife ATP CSV + ESPN Tennis 2026 tournament groupings)
                 FeedSpec("tml-atp", "TennisMyLife ATP CSV", Sport.TENNIS, "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/${today.year}.csv", "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/${today.year - 1}.csv") { raw ->
                     val list = CsvAndFeedParsers.parseTmlTennisCsv(raw); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("espn-tennis", "ESPN Tennis Tour", Sport.TENNIS, "https://site.api.espn.com/apis/site/v2/sports/tennis/all/scoreboard?dates=$espnDates") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnTennisScoreboard(raw)
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                // MMA / UFC (ESPN UFC Scoreboard)
+                FeedSpec("espn-mma", "ESPN UFC / MMA", Sport.MMA, "https://site.web.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=$espnDates", "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard?dates=$espnDates") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.MMA, "UFC", "UFC")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                // Formula 1 (Jolpica-F1 Official Standings + ESPN F1)
+                FeedSpec("jolpica-f1", "Jolpica-F1 Driver Standings", Sport.F1, "https://api.jolpi.ca/ergast/f1/current/driverStandings.json") { raw ->
+                    val map = CsvAndFeedParsers.parseJolpicaF1Standings(raw); liveStandingsProfiles.putAll(map); map.size
+                },
+                FeedSpec("espn-f1", "ESPN Formula 1", Sport.F1, "https://site.web.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard", "https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.F1, "F1", "Formula 1")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                // Cricket (Keyless ESPNcricinfo consumer feed)
+                FeedSpec("espncricinfo", "ESPNcricinfo Live Cricket", Sport.CRICKET, "https://hs-consumer-api.espncricinfo.com/v1/pages/matches/current?lang=en&latest=true") { raw ->
+                    val u = CsvAndFeedParsers.parseEspnCricinfoCurrent(raw); liveUpcoming.addAll(u); u.size
                 },
             )
 
@@ -503,8 +716,16 @@ class SyncRepository(
                                 val count = feed.action(raw)
                                 circuitStates.remove(feed.id)
                                 okCounter.incrementAndGet()
-                                val st = if (count == 0 && feed.id == "mlb-api") "OFF-SEASON" else "LIVE"
-                                val msg = if (st == "OFF-SEASON") "No scheduled games (Off-Season)" else "$count records parsed"
+                                val st = when {
+                                    count == 0 && feed.id == "mlb-api" -> "OFF-SEASON"
+                                    count == 0 -> "IDLE"
+                                    else -> "LIVE"
+                                }
+                                val msg = when (st) {
+                                    "OFF-SEASON" -> "No scheduled games (Off-Season)"
+                                    "IDLE" -> "0 scheduled games right now"
+                                    else -> "$count records parsed"
+                                }
                                 health.add(ProviderHealth(feed.id, feed.name, feed.sport, st, count, now.toString(), msg))
                             } catch (ce: CancellationException) {
                                 throw ce
@@ -770,6 +991,9 @@ class SyncRepository(
                 .groupBy { "${it.sport.name}|${it.dateIso}|${it.homeTeam.lowercase(Locale.ROOT)}|${it.awayTeam.lowercase(Locale.ROOT)}" }
                 .values
                 .map { dupes -> dupes.maxByOrNull { (if (it.oddsHome != null) 4 else 0) + (if (it.homeShots != null) 2 else 0) + (if (!it.id.startsWith("espn_")) 1 else 0) }!! }
+
+            _syncStatusText.value = "Grading completed predictions against final scores..."
+            autoGradePendingPredictions(dedupedHistory, nowMs)
 
             _syncStatusText.value = "Running on-device prediction models..."
             val prevSnap = _snapshot.value

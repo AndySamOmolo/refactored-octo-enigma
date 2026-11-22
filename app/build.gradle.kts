@@ -21,8 +21,9 @@ android {
         applicationId = "com.edgeledger.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 11).coerceAtLeast(11)
-        versionName = "8.2.0"
+        val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
+        versionCode = 80310 + ciRunNumber
+        versionName = "8.3.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
