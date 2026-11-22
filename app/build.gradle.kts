@@ -53,10 +53,11 @@ android {
                 "proguard-rules.pro"
             )
             val relConfig = signingConfigs.getByName("release")
-            if (relConfig.storeFile != null) {
-                signingConfig = relConfig
-            } else if (System.getenv("REQUIRE_RELEASE_SIGNING") == "true") {
-                throw GradleException("Release signing keystore is required (RELEASE_STORE_FILE missing). Refusing to fall back to debug signing.")
+            signingConfig = when {
+                relConfig.storeFile != null -> relConfig
+                System.getenv("REQUIRE_RELEASE_SIGNING") == "true" ->
+                    throw GradleException("Release signing keystore is required (RELEASE_STORE_FILE missing).")
+                else -> signingConfigs.getByName("debug")
             }
         }
     }
