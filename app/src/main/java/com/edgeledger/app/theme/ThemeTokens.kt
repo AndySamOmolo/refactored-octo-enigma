@@ -501,7 +501,13 @@ object ThemeCodec {
         if (raw.isNullOrBlank()) return null
         return runCatching {
             val element = json.parseToJsonElement(raw.trim())
-            if (element !is JsonObject) return null
+            if (element !is JsonObject || element.isEmpty()) return null
+            val knownKeys = setOf(
+                "schemaVersion", "mode", "accentHex", "winHex", "drawHex", "lossHex",
+                "density", "fontScale", "cornerRadiusDp", "dynamicColor", "presetName",
+                "reducedMotion", "highContrast", "oledBlack"
+            )
+            if (element.keys.none { it in knownKeys }) return null
 
             val migrated = buildJsonObject {
                 for ((key, value) in element) {
@@ -546,6 +552,7 @@ private fun byteToHex(value: Int): String {
 
 fun normalizeHexOrDefault(hex: String, fallback: String): String {
     val cleaned = hex.trim().removePrefix("#")
+    if (cleaned.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return fallback.uppercase()
     val expanded = when (cleaned.length) {
         3 -> buildString(6) {
             for (c in cleaned) {
@@ -566,6 +573,7 @@ fun normalizeHexOrDefault(hex: String, fallback: String): String {
 
 fun parseHexColor(hex: String, fallback: Color = Color(0xFF38BDF8)): Color {
     val cleaned = hex.trim().removePrefix("#")
+    if (cleaned.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return fallback
     val argbHex = when (cleaned.length) {
         3 -> buildString(8) {
             append("FF")

@@ -449,10 +449,10 @@ fun ProbBar(
     barHeight: Dp = 10.dp,
 ) {
     val c = AppTheme.tokens.colors
-    val hasDraw = drawProb != null && drawProb > 0.0
     val safeH = if (homeProb.isFinite()) homeProb.coerceAtLeast(0.0) else 0.5
     val safeA = if (awayProb.isFinite()) awayProb.coerceAtLeast(0.0) else 0.5
-    val safeD = if (hasDraw && drawProb != null && drawProb.isFinite()) drawProb.coerceAtLeast(0.0) else 0.0
+    val safeD = drawProb?.takeIf { it.isFinite() && it > 0.0 } ?: 0.0
+    val hasDraw = safeD > 0.0
     val sum = max(0.001, safeH + safeA + safeD)
     val hPct = ((safeH / sum) * 100.0).roundToInt().coerceIn(1, if (hasDraw) 97 else 99)
     val dPct = if (hasDraw) (((safeD / sum) * 100.0).roundToInt().coerceIn(1, (99 - hPct).coerceAtLeast(1))) else 0
