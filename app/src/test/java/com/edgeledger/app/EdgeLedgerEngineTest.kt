@@ -19,6 +19,7 @@ import com.edgeledger.app.model.HistoricalMatch
 import com.edgeledger.app.model.LivePlayerEntry
 import com.edgeledger.app.model.OddsDisplayFormat
 import com.edgeledger.app.model.Sport
+import com.edgeledger.app.model.StadiumWeather
 import com.edgeledger.app.theme.SurfaceStyle
 import com.edgeledger.app.theme.ThemeCodec
 import com.edgeledger.app.theme.ThemeConfigV1
@@ -37,6 +38,11 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import com.edgeledger.app.data.CacheSpillStore
+import com.edgeledger.app.data.WeeklySyncWorker
+import com.edgeledger.app.data.suspendRunCatching
+import kotlinx.coroutines.CancellationException
+import java.nio.file.Files
 import org.junit.Test
 
 class EdgeLedgerEngineTest {
@@ -645,5 +651,226 @@ class EdgeLedgerEngineTest {
         )
         val shrunk = PredictionEngine.buildTeamProfiles(oneGame)[PredictionEngine.profileKey(Sport.FOOTBALL, "SmallSample FC")]!!
         assertTrue(shrunk.avgScored in 1.8..2.6)
+    }
+
+    @Test
+    fun v870ExpandedSoccerExtraCsvWorldEloAndFplInjuriesParseCleanly() {
+        // Football-Data.co.uk Global Extra CSV schema (Home/Away/HG/AG + PSCH closing odds)
+        val extraCsv = """
+            Country,League,Season,Date,Time,Home,Away,HG,AG,Res,PSCH,PSCD,PSCA
+            Brazil,Serie A,2026,18/10/2026,20:00,Flamengo,Palmeiras,2,1,H,2.15,3.25,3.60
+            Brazil,Serie A,2021,10/05/2021,20:00,Flamengo,Palmeiras,1,0,H,2.00,3.20,3.80
+        """.trimIndent()
+        val bra = CsvAndFeedParsers.parseFootballDataCsv(extraCsv, "BRA", minYear = 2024)
+        assertEquals(1, bra.size)
+        assertEquals("Flamengo", bra[0].homeTeam)
+        assertEquals(2, bra[0].homeScore)
+        assertEquals(2.15, bra[0].oddsHome!!, 0.001)
+
+        // World Football Elo TSV (eloratings.net)
+        val worldTsv = "1\t1\tArgentina\t2125\t0\n2\t2\tSpain\t2110\t0\n"
+        val wElo = CsvAndFeedParsers.parseWorldFootballEloTsv(worldTsv)
+        assertEquals(2, wElo.size)
+        assertEquals(2125.0, wElo["Argentina"]!!, 0.01)
+
+        // FPL Bootstrap-Static live injuries
+        val fplJson = """
+            {"teams":[{"id":1,"name":"Arsenal"}],
+             "elements":[{"web_name":"Saka","team":1,"status":"d","chance_of_playing_next_round":25,"selected_by_percent":"32.4","minutes":900},
+                         {"web_name":"BenchKid","team":1,"status":"i","chance_of_playing_next_round":0,"selected_by_percent":"0.1","minutes":0}]}
+        """.trimIndent()
+        val inj = CsvAndFeedParsers.parseFplBootstrapInjuries(fplJson)
+        assertEquals(1, inj["Arsenal"]?.size)
+        assertTrue(inj["Arsenal"]!!.first().contains("Saka"))
+    }
+
+    @Test
+    fun v870MoneyPuckTennisAbstractGrecoUfcSquiggleAflOpenDotaAndNcaaParseCleanly() {
+        // MoneyPuck NHL Team xG CSV
+        val mpCsv = "team,situation,games_played,xGoalsPercentage,xGoalsFor,xGoalsAgainst\nEDM,all,20,0.58,68.0,49.2\nEDM,5on5,20,0.55,50.0,41.0\n"
+        val mp = CsvAndFeedParsers.parseMoneyPuckTeamsCsv(mpCsv)
+        assertEquals(1, mp.size)
+        val edm = mp[PredictionEngine.profileKey(Sport.NHL, "Edmonton Oilers")]
+        assertNotNull(edm)
+        assertTrue((edm?.elo ?: 0.0) > 1550.0)
+
+        // Tennis Abstract HTML Elo table
+        val taHtml = "<table><tr><td>1</td><td><a href='#'>Jannik Sinner</a></td><td>25.2</td><td>2245.6</td></tr></table>"
+        val ta = CsvAndFeedParsers.parseTennisAbstractEloHtml(taHtml)
+        assertEquals(2245.6, ta["Jannik Sinner"]!!, 0.01)
+
+        // Greco1899 UFC CSV
+        val ufcCsv = "EVENT,BOUT,OUTCOME,WEIGHTCLASS,METHOD\nUFC 310,Alex Pereira vs. Magomed Ankalaev,W/L,Light Heavyweight,KO/TKO\n"
+        val ufc = CsvAndFeedParsers.parseGrecoUfcResultsCsv(ufcCsv)
+        assertEquals(1, ufc.size)
+        assertEquals(Sport.MMA, ufc[0].sport)
+        assertEquals(1, ufc[0].homeScore)
+
+        // Squiggle AFL JSON
+        val aflJson = """
+            {"games":[
+                {"id":101,"date":"2026-08-10 14:10:00","hteam":"Geelong","ateam":"Sydney","hscore":98,"ascore":82,"complete":100},
+                {"id":102,"date":"2026-11-28 14:10:00","hteam":"Carlton","ateam":"Collingwood","complete":0,"venue":"MCG"}
+            ]}
+        """.trimIndent()
+        val (aflH, aflU) = CsvAndFeedParsers.parseSquiggleAflGames(aflJson)
+        assertEquals(1, aflH.size)
+        assertEquals(1, aflU.size)
+        assertEquals(Sport.AFL, aflU[0].sport)
+
+        // OpenDota Teams & Pro Matches
+        val dotaTeams = """[{"name":"Team Liquid","rating":1560.5,"wins":120,"losses":60,"logo_url":"https://cdn.example.com/tl.png"}]"""
+        val dotaProf = CsvAndFeedParsers.parseOpenDotaTeams(dotaTeams)
+        assertEquals(1, dotaProf.size)
+        val dotaMatches = """[{"match_id":8001,"radiant_name":"Team Liquid","dire_name":"Gaimin Gladiators","radiant_win":true,"start_time":1763856000}]"""
+        val dotaH = CsvAndFeedParsers.parseOpenDotaProMatches(dotaMatches)
+        assertEquals(1, dotaH.size)
+        assertEquals(Sport.ESPORTS, dotaH[0].sport)
+
+        // henrygd/ncaa-api scoreboard
+        val ncaaJson = """{"games":[{"game":{"gameID":"555","gameState":"pre","startTimeEpoch":"1764000000","home":{"names":{"short":"Georgia"}},"away":{"names":{"short":"Texas"}}}}]}"""
+        val (_, ncaaU) = CsvAndFeedParsers.parseNcaaApiScoreboard(ncaaJson, Sport.NFL, "NCAAF", "NCAA Football")
+        assertEquals(1, ncaaU.size)
+        assertEquals("Georgia", ncaaU[0].homeTeam)
+    }
+
+    @Test
+    fun v870SxBetSportsGameOddsParlayCfbdAndNewSportsCoherent() {
+        val client = OptionalOddsAndDataClient(OkHttpClient())
+        val sxJson = """{"data":{"markets":[{"teamOneName":"Chiefs","teamTwoName":"Bills","outcomeOneName":"Chiefs","impliedOdds":"0.57"}]}}"""
+        val sx = client.parseSxBetMarketsPayload(sxJson)
+        assertEquals(1, sx.size)
+        assertTrue(sx[0].second in 0.56..0.58)
+
+        val sgoJson = """{"data":[{"leagueID":"NBA","teams":{"home":{"names":{"long":"Boston Celtics"}},"away":{"names":{"long":"Miami Heat"}}},"odds":{"points-home-game-ml-home":{"fairOdds":"-200"},"points-away-game-ml-away":{"fairOdds":"+180"}}}]}"""
+        val sgo = client.parseSportsGameOddsPayload(sgoJson)
+        assertEquals(1, sgo.size)
+        assertTrue(sgo.values.first().first().isSharp)
+
+        val cfbdJson = """[{"homeTeam":"Georgia","awayTeam":"Alabama","lines":[{"provider":"consensus","homeMoneyline":-150,"awayMoneyline":130}]}]"""
+        val cfbd = client.parseCfbdLinesPayload(cfbdJson)
+        assertEquals(1, cfbd.size)
+
+        val keys = UserApiKeys(sportsGameOddsKey = "secret-sgo-99", parlayApiKey = "secret-parlay-88", cfbdApiKey = "secret-cfbd-77")
+        assertTrue(keys.hasAnyApiKey())
+        assertFalse(keys.toString().contains("secret-sgo-99"))
+        assertFalse(keys.toString().contains("secret-parlay-88"))
+        assertFalse(keys.toString().contains("secret-cfbd-77"))
+
+        // New Sport enum verticals predict cleanly
+        for (sp in listOf(Sport.RUGBY, Sport.AFL, Sport.ESPORTS, Sport.GOLF)) {
+            val pred = PredictionEngine.predictAllMarkets(sp, "Team A", "Team B", null, null)
+            assertEquals(1.0, pred.probHome + pred.probAway, 0.02)
+            assertTrue(pred.topPicks.isNotEmpty())
+        }
+    }
+
+
+    @Test
+    fun auditHardening_threeWayArbitrageAndConfigurableFlatStake() {
+        val arb = OddsMath.calculateThreeWayArbitrage(3.30, 3.60, 3.40, 100.0)
+        assertTrue(arb.isArbitrage)
+        assertTrue(arb.profitPct > 0.0)
+        assertEquals(100.0, arb.stakeHome + arb.stakeDraw + arb.stakeAway, 1e-6)
+        assertTrue(arb.guaranteedProfit > 0.0)
+
+        val noArb = OddsMath.calculateThreeWayArbitrage(1.80, 3.30, 4.20, 100.0)
+        assertFalse(noArb.isArbitrage)
+
+        val customFlat = OddsMath.recommendedStake(
+            bankroll = 2000.0,
+            modelProb = 0.60,
+            decimalOdds = 2.00,
+            mode = StakingMode.FLAT,
+            maxCap = 0.10,
+            flatUnitAmount = 75.0,
+        )
+        assertEquals(75.0, customFlat, 1e-6)
+    }
+
+    @Test
+    fun auditHardening_productionAlignedBacktestReportsCalibrationMetrics() {
+        val matches = (1..36).map { i ->
+            val day = java.time.LocalDate.of(2026, 1, 1).plusDays(i.toLong()).toString()
+            HistoricalMatch(
+                id = "bt_$i",
+                sport = Sport.FOOTBALL,
+                leagueId = "E0",
+                dateIso = day,
+                homeTeam = if (i % 2 == 0) "Arsenal" else "Chelsea",
+                awayTeam = if (i % 2 == 0) "Chelsea" else "Arsenal",
+                homeScore = if (i % 3 == 0) 1 else 2,
+                awayScore = 1,
+                oddsHome = 2.10,
+                oddsDraw = 3.40,
+                oddsAway = 3.60,
+            )
+        }
+        val rec = PredictionEngine.runWalkForwardBacktest(Sport.FOOTBALL, "E0", "Premier League", matches)
+        assertTrue(rec.gamesTested > 0)
+        assertTrue(rec.logLoss.isFinite() && rec.logLoss > 0.0)
+        assertTrue(rec.rps.isFinite() && rec.rps in 0.0..1.0)
+        assertTrue(rec.ecePct.isFinite() && rec.ecePct in 0.0..100.0)
+        assertTrue(PredictionEngine.leagueDixonColesRho("I1") < PredictionEngine.leagueDixonColesRho("D1"))
+    }
+
+    @Test
+    fun auditHardening_cacheSpillStoreQuietHoursAndCancellationPropagation() {
+        val tmpDir = Files.createTempDirectory("edgeledger_cache_test").toFile()
+        try {
+            val small = "small_payload_json"
+            val encSmall = CacheSpillStore.encodePayload(tmpDir, "k_small", small)
+            assertEquals(small, encSmall)
+            assertEquals(small, CacheSpillStore.decodePayload(tmpDir, encSmall))
+
+            val large = "x".repeat(600_000)
+            val encLarge = CacheSpillStore.encodePayload(tmpDir, "k_large", large)
+            assertNotNull(encLarge)
+            assertTrue(encLarge!!.startsWith(CacheSpillStore.FILE_MARKER_PREFIX))
+            assertEquals(large, CacheSpillStore.decodePayload(tmpDir, encLarge))
+        } finally {
+            tmpDir.deleteRecursively()
+        }
+
+        assertTrue(WeeklySyncWorker.isWithinQuietHours(23, 22, 7))
+        assertTrue(WeeklySyncWorker.isWithinQuietHours(6, 22, 7))
+        assertFalse(WeeklySyncWorker.isWithinQuietHours(14, 22, 7))
+
+        var rethrown = false
+        try {
+            suspendRunCatching { throw CancellationException("cancelled") }
+        } catch (_: CancellationException) {
+            rethrown = true
+        }
+        assertTrue(rethrown)
+    }
+
+    @Test
+    fun quantUpgrades_weatherAltitudeInjuriesAndNegBinOverdispersion() {
+        val nb85 = StatsMath.negBinOverProb(10.0, 8.5, dispersionAlpha = 0.045)
+        val nb95 = StatsMath.negBinOverProb(10.0, 9.5, dispersionAlpha = 0.045)
+        assertTrue(nb85 in 0.05..0.95)
+        assertTrue(nb85 > nb95)
+
+        val calmFb = PredictionEngine.predictAllMarkets(Sport.FOOTBALL, "Arsenal", "Chelsea", null, null)
+        val windyFb = PredictionEngine.predictAllMarkets(
+            Sport.FOOTBALL, "Arsenal", "Chelsea", null, null,
+            weather = StadiumWeather("Emirates", 11, 36, 70, "Windy"),
+        )
+        assertTrue(windyFb.projectedHome + windyFb.projectedAway < calmFb.projectedHome + calmFb.projectedAway)
+
+        val seaLevelMlb = PredictionEngine.predictAllMarkets(Sport.MLB, "Rockies", "Dodgers", null, null)
+        val coorsMlb = PredictionEngine.predictAllMarkets(
+            Sport.MLB, "Rockies", "Dodgers", null, null,
+            weather = StadiumWeather("Coors Field", 24, 8, 5, "Clear · High Altitude (1609m)"),
+        )
+        assertTrue(coorsMlb.projectedTotal > seaLevelMlb.projectedTotal)
+
+        val healthy = PredictionEngine.predictAllMarkets(Sport.FOOTBALL, "Arsenal", "Chelsea", null, null)
+        val injured = PredictionEngine.predictAllMarkets(
+            Sport.FOOTBALL, "Arsenal", "Chelsea", null, null,
+            homeInjuryCount = 3,
+        )
+        assertTrue(injured.probHome < healthy.probHome)
     }
 }

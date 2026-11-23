@@ -6,9 +6,21 @@ import com.edgeledger.app.model.BookmakerOddsLine
 import com.edgeledger.app.model.Sport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.security.MessageDigest
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -26,6 +38,7 @@ import java.io.IOException
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -39,9 +52,15 @@ data class UserApiKeys(
     val balldontlieKey: String = "",
     val liveTennisApiKey: String = "",
     val openWeatherApiKey: String = "",
+    val sportsGameOddsKey: String = "",
+    val parlayApiKey: String = "",
+    val cfbdApiKey: String = "",
+    val footballChartsKey: String = "",
     val enablePolymarket: Boolean = true,
     val enableKalshi: Boolean = true,
     val enableManifold: Boolean = true,
+    val enableSxBet: Boolean = true,
+    val enablePredictionBubbles: Boolean = true,
 ) {
     fun hasAnyApiKey(): Boolean =
         theOddsApiKey.isNotBlank() ||
@@ -51,7 +70,11 @@ data class UserApiKeys(
             apiSportsKey.isNotBlank() ||
             balldontlieKey.isNotBlank() ||
             liveTennisApiKey.isNotBlank() ||
-            openWeatherApiKey.isNotBlank()
+            openWeatherApiKey.isNotBlank() ||
+            sportsGameOddsKey.isNotBlank() ||
+            parlayApiKey.isNotBlank() ||
+            cfbdApiKey.isNotBlank() ||
+            footballChartsKey.isNotBlank()
 
     override fun toString(): String =
         "UserApiKeys(" +
@@ -63,9 +86,15 @@ data class UserApiKeys(
             "balldontlieKey=${maskSecret(balldontlieKey)}, " +
             "liveTennisApiKey=${maskSecret(liveTennisApiKey)}, " +
             "openWeatherApiKey=${maskSecret(openWeatherApiKey)}, " +
+            "sportsGameOddsKey=${maskSecret(sportsGameOddsKey)}, " +
+            "parlayApiKey=${maskSecret(parlayApiKey)}, " +
+            "cfbdApiKey=${maskSecret(cfbdApiKey)}, " +
+            "footballChartsKey=${maskSecret(footballChartsKey)}, " +
             "enablePolymarket=$enablePolymarket, " +
             "enableKalshi=$enableKalshi, " +
-            "enableManifold=$enableManifold)"
+            "enableManifold=$enableManifold, " +
+            "enableSxBet=$enableSxBet, " +
+            "enablePredictionBubbles=$enablePredictionBubbles)"
 
     private fun maskSecret(secret: String): String =
         if (secret.isBlank()) "<empty>" else "<configured:${secret.length}ch>"
@@ -80,9 +109,86 @@ data class ProviderQuotaStatus(
     val lastStatus: String,
 )
 
+/**
+ * Cancellation-safe wrapper around runCatching that always rethrows [CancellationException].
+ */
+internal inline fun <R> suspendRunCatching(block: () -> R): Result<R> = try {
+    Result.success(block())
+} catch (ce: CancellationException) {
+    throw ce
+} catch (t: Throwable) {
+    Result.failure(t)
+}
+
+/**
+ * Prevents Android SQLite CursorWindow 2 MB crashes by keeping inline Room cache payloads
+ * strictly below 512 KB and spilling larger payloads to atomic gzipped files in [cacheDir].
+ */
+internal object CacheSpillStore {
+    const val MAX_INLINE_BYTES = 512 * 1024
+    const val FILE_MARKER_PREFIX = "FILE_CACHE_GZ:"
+
+    private fun spillDir(cacheDir: File): File =
+        File(cacheDir, "api_payload_cache").apply { if (!exists()) mkdirs() }
+
+    private fun hashKey(key: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    fun encodePayload(cacheDir: File?, cacheKey: String, payload: String): String? {
+        if (payload.isBlank()) return null
+        val bytes = payload.toByteArray(Charsets.UTF_8)
+        if (bytes.size <= MAX_INLINE_BYTES) return payload
+        val dir = cacheDir?.let { spillDir(it) } ?: return null
+        val fileName = "${hashKey(cacheKey)}.gz"
+        val target = File(dir, fileName)
+        val tmp = File(dir, "$fileName.${UUID.randomUUID()}.tmp")
+        return try {
+            GZIPOutputStream(FileOutputStream(tmp)).use { it.write(bytes) }
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+            "$FILE_MARKER_PREFIX$fileName"
+        } catch (_: Exception) {
+            tmp.delete()
+            null
+        }
+    }
+
+    fun decodePayload(cacheDir: File?, stored: String?): String? {
+        if (stored.isNullOrBlank()) return null
+        if (!stored.startsWith(FILE_MARKER_PREFIX)) return stored
+        val dir = cacheDir?.let { spillDir(it) } ?: return null
+        val fileName = stored.removePrefix(FILE_MARKER_PREFIX)
+        if (fileName.contains('/') || fileName.contains('\\') || fileName.contains("..")) return null
+        val file = File(dir, fileName)
+        if (!file.exists()) return null
+        return try {
+            GZIPInputStream(FileInputStream(file)).bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun pruneStaleSpillFiles(cacheDir: File?, maxAgeMs: Long = 7L * 24L * 3_600_000L) {
+        val dir = cacheDir?.let { File(it, "api_payload_cache") } ?: return
+        if (!dir.exists()) return
+        val cutoff = System.currentTimeMillis() - maxAgeMs
+        dir.listFiles()?.forEach { f ->
+            val tmpCutoff = System.currentTimeMillis() - 10L * 60_000L
+            if (f.isFile && ((f.name.endsWith(".tmp") && f.lastModified() < tmpCutoff) || f.lastModified() < cutoff)) {
+                f.delete()
+            }
+        }
+    }
+}
+
 class OptionalOddsAndDataClient(
     private val client: OkHttpClient,
     private val dao: EdgeLedgerDao? = null,
+    private val cacheDir: File? = null,
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -129,6 +235,32 @@ class OptionalOddsAndDataClient(
 
     private fun currentMonthlyWindow(): String = LocalDate.now(ZoneOffset.UTC).toString().take(7)
 
+    private suspend fun executeCancellable(httpClient: OkHttpClient, request: Request): Response =
+        suspendCancellableCoroutine { cont ->
+            val call = httpClient.newCall(request)
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (cont.isActive) cont.resumeWithException(e)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    if (cont.isActive) {
+                        cont.resume(response)
+                    } else {
+                        response.close()
+                    }
+                }
+            })
+        }
+
+    private data class QuotaReservation(
+        val allowed: Boolean,
+        val reservedUsed: Int,
+        val serverRem: Int?,
+        val denyReason: String? = null,
+    )
+
     private suspend fun executeCachedGet(
         cacheKey: String,
         provider: String,
@@ -139,152 +271,164 @@ class OptionalOddsAndDataClient(
         useAuthClient: Boolean = true,
     ): CachedHttpResult = withContext(Dispatchers.IO) {
         val nowMs = System.currentTimeMillis()
-        val cached = try { dao?.getApiCache(cacheKey) } catch (ce: CancellationException) { throw ce } catch (_: Exception) { null }
-        if (cached != null && nowMs < cached.expiresAtEpochMs && cached.payloadJson.isNotBlank()) {
+        val cached = suspendRunCatching { dao?.getApiCache(cacheKey) }.getOrNull()
+        val cachedBody = CacheSpillStore.decodePayload(cacheDir, cached?.payloadJson)
+        if (cached != null && nowMs < cached.expiresAtEpochMs && !cachedBody.isNullOrBlank()) {
             val minsLeft = ((cached.expiresAtEpochMs - nowMs) / 60_000L).coerceAtLeast(1L)
             setStatus(provider, "Cached (${minsLeft}m TTL left)")
-            return@withContext CachedHttpResult(body = cached.payloadJson, fromCache = true)
+            return@withContext CachedHttpResult(body = cachedBody, fromCache = true)
         }
 
-        val existingQuota = quotaMutex.withLock { try { dao?.getApiQuota(provider) } catch (ce: CancellationException) { throw ce } catch (_: Exception) { null } }
-        val sameWindow = existingQuota != null && existingQuota.windowKey == windowKey
-        val usedInWindow = if (sameWindow) existingQuota!!.callsUsed else 0
-        val serverRem = if (sameWindow) existingQuota!!.serverRemaining else null
-        val cooldownUntil = existingQuota?.cooldownUntilEpochMs ?: 0L
+        // Atomic check-and-reserve inside quotaMutex so concurrent coroutines cannot race past hardLimit
+        val reservation = quotaMutex.withLock {
+            val existingQuota = suspendRunCatching { dao?.getApiQuota(provider) }.getOrNull()
+            val sameWindow = existingQuota != null && existingQuota.windowKey == windowKey
+            val usedInWindow = if (sameWindow) existingQuota.callsUsed else 0
+            val serverRem = if (sameWindow) existingQuota.serverRemaining else null
+            val cooldownUntil = existingQuota?.cooldownUntilEpochMs ?: 0L
 
-        if (nowMs < cooldownUntil) {
-            val mins = ((cooldownUntil - nowMs) / 60_000L).coerceAtLeast(1L)
-            setStatus(provider, "Cooldown (${mins}m) · using cache")
-            return@withContext CachedHttpResult(body = cached?.payloadJson, fromCache = true)
-        }
-        if (usedInWindow >= hardLimit || (serverRem != null && serverRem <= 0)) {
-            setStatus(provider, "Quota cap ($usedInWindow/$hardLimit) · cached")
-            return@withContext CachedHttpResult(body = cached?.payloadJson, fromCache = true)
+            when {
+                nowMs < cooldownUntil -> {
+                    val mins = ((cooldownUntil - nowMs) / 60_000L).coerceAtLeast(1L)
+                    QuotaReservation(false, usedInWindow, serverRem, "Cooldown (${mins}m) · using cache")
+                }
+                usedInWindow >= hardLimit || (serverRem != null && serverRem <= 0) -> {
+                    QuotaReservation(false, usedInWindow, serverRem, "Quota cap ($usedInWindow/$hardLimit) · cached")
+                }
+                else -> {
+                    val nextReserved = usedInWindow + 1
+                    suspendRunCatching {
+                        dao?.upsertApiQuota(
+                            ApiQuotaEntity(
+                                provider = provider,
+                                windowKey = windowKey,
+                                callsUsed = nextReserved,
+                                serverRemaining = serverRem?.let { (it - 1).coerceAtLeast(0) },
+                                hardLimit = hardLimit,
+                                lastStatus = "In flight ($nextReserved/$hardLimit)",
+                                cooldownUntilEpochMs = 0L,
+                                updatedAtEpochMs = nowMs,
+                            )
+                        )
+                    }
+                    QuotaReservation(true, nextReserved, serverRem)
+                }
+            }
         }
 
-        if (!cached?.etag.isNullOrBlank()) {
-            requestBuilder.header("If-None-Match", cached!!.etag!!)
+        if (!reservation.allowed) {
+            reservation.denyReason?.let { setStatus(provider, it) }
+            return@withContext CachedHttpResult(body = cachedBody, fromCache = !cachedBody.isNullOrBlank())
+        }
+
+        val etagValue = cached?.etag
+        if (!etagValue.isNullOrBlank() && !cachedBody.isNullOrBlank()) {
+            requestBuilder.header("If-None-Match", etagValue)
         }
         val req = requestBuilder.build()
         val httpClient = if (useAuthClient) authClient else client
 
         try {
             incrementCalls(provider)
-            httpClient.newCall(req).execute().use { response ->
+            executeCancellable(httpClient, req).use { response ->
                 val remainingStr = response.header("x-requests-remaining")
                 val remainingInt = remainingStr?.toIntOrNull()
                 val usedHeader = response.header("x-requests-used")?.toIntOrNull()
-                val nextUsed = usedHeader ?: (usedInWindow + 1)
+                val nextUsed = usedHeader ?: reservation.reservedUsed
                 if (usedHeader != null) {
                     callsByProvider.computeIfAbsent(provider) { AtomicInteger(0) }.set(usedHeader)
                 }
 
-                when {
-                    response.code == 304 && cached != null -> {
-                        val refreshed = cached.copy(fetchedAtEpochMs = nowMs, expiresAtEpochMs = nowMs + ttlMs)
-                        runCatching { dao?.putApiCache(refreshed) }
-                        val statusStr = "Cached (304 unchanged)"
-                        setStatus(provider, statusStr)
-                        runCatching {
+                suspend fun persistQuota(statusStr: String, cooldownUntil: Long = 0L) {
+                    val doneMs = System.currentTimeMillis()
+                    quotaMutex.withLock {
+                        val cur = suspendRunCatching { dao?.getApiQuota(provider) }.getOrNull()
+                        val mergedUsed = if (cur != null && cur.windowKey == windowKey) maxOf(cur.callsUsed, nextUsed) else nextUsed
+                        val mergedRem = remainingInt ?: cur?.serverRemaining ?: reservation.serverRem?.let { (it - 1).coerceAtLeast(0) }
+                        suspendRunCatching {
                             dao?.upsertApiQuota(
                                 ApiQuotaEntity(
                                     provider = provider,
                                     windowKey = windowKey,
-                                    callsUsed = nextUsed,
-                                    serverRemaining = remainingInt ?: serverRem,
+                                    callsUsed = mergedUsed,
+                                    serverRemaining = mergedRem,
                                     hardLimit = hardLimit,
                                     lastStatus = statusStr,
-                                    cooldownUntilEpochMs = 0L,
-                                    updatedAtEpochMs = nowMs,
+                                    cooldownUntilEpochMs = cooldownUntil,
+                                    updatedAtEpochMs = doneMs,
                                 )
                             )
                         }
-                        CachedHttpResult(body = cached.payloadJson, fromCache = true, remainingHeader = remainingStr)
+                    }
+                }
+
+                when {
+                    response.code == 304 && cached != null && !cachedBody.isNullOrBlank() -> {
+                        val refreshed = cached.copy(fetchedAtEpochMs = nowMs, expiresAtEpochMs = nowMs + ttlMs)
+                        suspendRunCatching { dao?.putApiCache(refreshed) }
+                        val statusStr = "Cached (304 unchanged)"
+                        setStatus(provider, statusStr)
+                        persistQuota(statusStr)
+                        CachedHttpResult(body = cachedBody, fromCache = true, remainingHeader = remainingStr)
                     }
                     response.code == 429 -> {
                         val retrySec = response.header("Retry-After")?.toLongOrNull()?.coerceIn(60L, 7200L) ?: 1800L
                         val untilMs = nowMs + retrySec * 1000L
                         val statusStr = "HTTP 429 · paused ${retrySec / 60}m"
                         setStatus(provider, statusStr)
-                        runCatching {
-                            dao?.upsertApiQuota(
-                                ApiQuotaEntity(
-                                    provider = provider,
-                                    windowKey = windowKey,
-                                    callsUsed = nextUsed,
-                                    serverRemaining = remainingInt ?: serverRem,
-                                    hardLimit = hardLimit,
-                                    lastStatus = statusStr,
-                                    cooldownUntilEpochMs = untilMs,
-                                    updatedAtEpochMs = nowMs,
-                                )
-                            )
-                        }
-                        CachedHttpResult(body = cached?.payloadJson, fromCache = cached != null, remainingHeader = remainingStr)
+                        persistQuota(statusStr, cooldownUntil = untilMs)
+                        CachedHttpResult(body = cachedBody, fromCache = !cachedBody.isNullOrBlank(), remainingHeader = remainingStr)
                     }
                     response.isSuccessful -> {
                         val body = readBoundedBody(response)
                         val isApiErrorPayload = body.contains("\"status\":\"failure\"", ignoreCase = true) ||
                             (body.contains("\"errors\":{\"") && !body.contains("\"errors\":[]"))
                         if (body.isNotBlank() && !isApiErrorPayload) {
-                            runCatching {
-                                dao?.putApiCache(
-                                    ApiResponseCacheEntity(
-                                        cacheKey = cacheKey,
-                                        provider = provider,
-                                        payloadJson = body,
-                                        fetchedAtEpochMs = nowMs,
-                                        expiresAtEpochMs = nowMs + ttlMs,
-                                        httpStatus = response.code,
-                                        etag = response.header("ETag"),
+                            val encoded = CacheSpillStore.encodePayload(cacheDir, cacheKey, body)
+                            if (encoded != null) {
+                                suspendRunCatching {
+                                    dao?.putApiCache(
+                                        ApiResponseCacheEntity(
+                                            cacheKey = cacheKey,
+                                            provider = provider,
+                                            payloadJson = encoded,
+                                            fetchedAtEpochMs = nowMs,
+                                            expiresAtEpochMs = nowMs + ttlMs,
+                                            httpStatus = response.code,
+                                            etag = response.header("ETag"),
+                                        )
                                     )
-                                )
+                                }
                             }
                         }
                         val remNote = remainingStr?.let { " · $it left" }.orEmpty()
                         val statusStr = "Live OK ($nextUsed/$hardLimit$remNote)"
-                        runCatching {
-                            dao?.upsertApiQuota(
-                                ApiQuotaEntity(
-                                    provider = provider,
-                                    windowKey = windowKey,
-                                    callsUsed = nextUsed,
-                                    serverRemaining = remainingInt ?: serverRem,
-                                    hardLimit = hardLimit,
-                                    lastStatus = statusStr,
-                                    cooldownUntilEpochMs = 0L,
-                                    updatedAtEpochMs = nowMs,
-                                )
-                            )
-                        }
-                        CachedHttpResult(body = body.ifBlank { cached?.payloadJson }, fromCache = false, remainingHeader = remainingStr)
+                        setStatus(provider, statusStr)
+                        persistQuota(statusStr)
+                        CachedHttpResult(body = body.ifBlank { cachedBody }, fromCache = false, remainingHeader = remainingStr)
                     }
                     else -> {
                         val statusStr = "HTTP ${response.code}${remainingStr?.let { " ($it left)" }.orEmpty()}"
                         setStatus(provider, statusStr)
-                        runCatching {
-                            dao?.upsertApiQuota(
-                                ApiQuotaEntity(
-                                    provider = provider,
-                                    windowKey = windowKey,
-                                    callsUsed = nextUsed,
-                                    serverRemaining = remainingInt ?: serverRem,
-                                    hardLimit = hardLimit,
-                                    lastStatus = statusStr,
-                                    cooldownUntilEpochMs = 0L,
-                                    updatedAtEpochMs = nowMs,
-                                )
-                            )
-                        }
-                        CachedHttpResult(body = cached?.payloadJson, fromCache = cached != null, remainingHeader = remainingStr)
+                        persistQuota(statusStr)
+                        CachedHttpResult(body = cachedBody, fromCache = !cachedBody.isNullOrBlank(), remainingHeader = remainingStr)
                     }
                 }
             }
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: IOException) {
-            setStatus(provider, if (cached != null) "Offline · using cache" else "Network error: ${sanitizeError(e)}")
-            CachedHttpResult(body = cached?.payloadJson, fromCache = cached != null)
+            val statusStr = if (!cachedBody.isNullOrBlank()) "Offline · using cache" else "Network error: ${sanitizeError(e)}"
+            setStatus(provider, statusStr)
+            quotaMutex.withLock {
+                val cur = suspendRunCatching { dao?.getApiQuota(provider) }.getOrNull()
+                if (cur != null && cur.windowKey == windowKey) {
+                    suspendRunCatching {
+                        dao?.upsertApiQuota(cur.copy(lastStatus = statusStr, updatedAtEpochMs = System.currentTimeMillis()))
+                    }
+                }
+            }
+            CachedHttpResult(body = cachedBody, fromCache = !cachedBody.isNullOrBlank())
         }
     }
 
@@ -1103,6 +1247,312 @@ class OptionalOddsAndDataClient(
         }
     }
 
+
+    suspend fun fetchSxBetMarkets(): List<Pair<String, Double>> {
+        return try {
+            val url = "https://api.sx.bet/markets/active?onlyMainLine=true"
+            val reqBuilder = Request.Builder().url(url).header("Accept", "application/json").get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "sxbet:markets_active",
+                provider = PROVIDER_SX_BET,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_30_MIN_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 1000,
+                useAuthClient = false,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            val parsed = parseSxBetMarketsPayload(body)
+            if (!cachedRes.fromCache) {
+                setStatus(PROVIDER_SX_BET, if (parsed.isNotEmpty()) "OK (${parsed.size} exchange markets)" else "No active markets")
+            }
+            parsed
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_SX_BET, "Error: ${sanitizeError(e)}")
+            emptyList()
+        }
+    }
+
+    internal fun parseSxBetMarketsPayload(body: String): List<Pair<String, Double>> {
+        val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: return emptyList()
+        val markets = root.objectOrNull("data")?.arrayOrNull("markets") ?: root.arrayOrNull("markets") ?: return emptyList()
+        val out = mutableListOf<Pair<String, Double>>()
+        for (elem in markets.take(60)) {
+            val m = elem as? JsonObject ?: continue
+            val t1 = m.stringOrNull("teamOneName")?.trim().orEmpty()
+            val t2 = m.stringOrNull("teamTwoName")?.trim().orEmpty()
+            val o1 = m.stringOrNull("outcomeOneName")?.trim().orEmpty()
+            val label = when {
+                t1.isNotBlank() && t2.isNotBlank() -> "$t1 vs $t2 (${o1.ifBlank { t1 }})"
+                o1.isNotBlank() -> o1
+                else -> continue
+            }
+            val implied = m.doubleOrNull("impliedOdds")
+                ?: m.stringOrNull("impliedOdds")?.toDoubleOrNull()
+                ?: 0.50
+            val prob = when {
+                implied in 0.01..0.99 -> implied
+                implied > 1.0 -> (1.0 / implied).coerceIn(0.01, 0.99)
+                else -> 0.50
+            }
+            out.add(label to prob)
+        }
+        return out.distinctBy { it.first.lowercase(Locale.US) }
+    }
+
+    suspend fun fetchPredictionBubblesMarkets(): List<Pair<String, Double>> {
+        return try {
+            val url = "https://predictionbubbles.net/data.json"
+            val reqBuilder = Request.Builder().url(url).header("Accept", "application/json").get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "predictionbubbles:data_json",
+                provider = PROVIDER_PREDICTION_BUBBLES,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_30_MIN_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 500,
+                useAuthClient = false,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            val parsed = parsePredictionBubblesPayload(body)
+            if (!cachedRes.fromCache) {
+                setStatus(PROVIDER_PREDICTION_BUBBLES, if (parsed.isNotEmpty()) "OK (${parsed.size} sports markets)" else "No active sports markets")
+            }
+            parsed
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_PREDICTION_BUBBLES, "Error: ${sanitizeError(e)}")
+            emptyList()
+        }
+    }
+
+    internal fun parsePredictionBubblesPayload(body: String): List<Pair<String, Double>> {
+        val parsed = runCatching { json.parseToJsonElement(body) }.getOrNull() ?: return emptyList()
+        val arr = when (parsed) {
+            is JsonArray -> parsed
+            is JsonObject -> parsed.arrayOrNull("markets") ?: parsed.arrayOrNull("data") ?: return emptyList()
+            else -> return emptyList()
+        }
+        val out = mutableListOf<Pair<String, Double>>()
+        for (elem in arr) {
+            val obj = elem as? JsonObject ?: continue
+            val q = obj.stringOrNull("question")?.takeIf { it.isNotBlank() }
+                ?: obj.stringOrNull("title")?.takeIf { it.isNotBlank() }
+                ?: continue
+            if (!isSportsMarketQuestion(q, obj.stringOrNull("category").orEmpty())) continue
+            val rawProb = obj.doubleOrNull("probability")
+                ?: obj.doubleOrNull("yes_price")
+                ?: obj.doubleOrNull("price")
+                ?: continue
+            val prob = if (rawProb > 1.0 && rawProb <= 100.0) rawProb / 100.0 else rawProb
+            if (prob.isFinite() && prob in 0.01..0.99) {
+                out.add(q.trim() to prob)
+            }
+        }
+        return out.distinctBy { it.first.lowercase(Locale.US) }.take(25)
+    }
+
+    suspend fun fetchSportsGameOdds(apiKey: String): Map<String, List<BookmakerOddsLine>> {
+        val cleanKey = sanitizeKey(apiKey)
+        if (cleanKey.isBlank()) {
+            setStatus(PROVIDER_SPORTSGAMEODDS, "Not configured")
+            return emptyMap()
+        }
+        return try {
+            val url = "https://api.sportsgameodds.com/v2/events?oddsAvailable=true&finalized=false&limit=40"
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("X-Api-Key", cleanKey)
+                .header("Accept", "application/json")
+                .get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "sportsgameodds:events_upcoming",
+                provider = PROVIDER_SPORTSGAMEODDS,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentMonthlyWindow(),
+                hardLimit = 2200,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyMap()
+            val result = parseSportsGameOddsPayload(body)
+            if (!cachedRes.fromCache) setStatus(PROVIDER_SPORTSGAMEODDS, "OK (${result.size} events)")
+            result
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_SPORTSGAMEODDS, "Error: ${sanitizeError(e)}")
+            emptyMap()
+        }
+    }
+
+    internal fun parseSportsGameOddsPayload(body: String): Map<String, List<BookmakerOddsLine>> {
+        val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: return emptyMap()
+        val data = root.arrayOrNull("data") ?: return emptyMap()
+        val out = LinkedHashMap<String, List<BookmakerOddsLine>>()
+        for (elem in data) {
+            val ev = elem as? JsonObject ?: continue
+            val teams = ev.objectOrNull("teams") ?: continue
+            val rawHome = teams.objectOrNull("home")?.objectOrNull("names")?.stringOrNull("long")
+                ?: teams.objectOrNull("home")?.stringOrNull("name") ?: continue
+            val rawAway = teams.objectOrNull("away")?.objectOrNull("names")?.stringOrNull("long")
+                ?: teams.objectOrNull("away")?.stringOrNull("name") ?: continue
+            val league = ev.stringOrNull("leagueID").orEmpty().uppercase(Locale.US)
+            val sportEnum = when {
+                "NFL" in league || "NCAAF" in league -> Sport.NFL
+                "NBA" in league || "NCAAB" in league || "WNBA" in league -> Sport.NBA
+                "NHL" in league -> Sport.NHL
+                "MLB" in league -> Sport.MLB
+                else -> Sport.FOOTBALL
+            }
+            val oddsObj = ev.objectOrNull("odds") ?: continue
+            val homeMl = oddsObj.objectOrNull("points-home-game-ml-home")?.stringOrNull("fairOdds")?.toDoubleOrNull()
+                ?: oddsObj.objectOrNull("points-home-game-ml-home")?.stringOrNull("bookOdds")?.toDoubleOrNull()
+            val awayMl = oddsObj.objectOrNull("points-away-game-ml-away")?.stringOrNull("fairOdds")?.toDoubleOrNull()
+                ?: oddsObj.objectOrNull("points-away-game-ml-away")?.stringOrNull("bookOdds")?.toDoubleOrNull()
+            val oh = homeMl?.let { com.edgeledger.app.engine.OddsMath.americanToDecimalOrNull(it) } ?: continue
+            val oa = awayMl?.let { com.edgeledger.app.engine.OddsMath.americanToDecimalOrNull(it) } ?: continue
+            val normHome = CsvAndFeedParsers.normalizeTeam(rawHome, sportEnum)
+            val normAway = CsvAndFeedParsers.normalizeTeam(rawAway, sportEnum)
+            if (normHome.isBlank() || normAway.isBlank()) continue
+            out[normalizeMatchKey(normHome, normAway)] = listOf(
+                BookmakerOddsLine(
+                    bookmaker = "SportsGameOdds Fair",
+                    isSharp = true,
+                    homeOdds = oh,
+                    drawOdds = null,
+                    awayOdds = oa,
+                    updatedLabel = "SGO",
+                )
+            )
+        }
+        return out
+    }
+
+    suspend fun fetchParlayApiOdds(apiKey: String): Map<String, List<BookmakerOddsLine>> {
+        val cleanKey = sanitizeKey(apiKey)
+        if (cleanKey.isBlank()) {
+            setStatus(PROVIDER_PARLAY_API, "Not configured")
+            return emptyMap()
+        }
+        return try {
+            val url = "https://api.parlay-api.com/v1/odds?market=h2h&limit=40"
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("X-API-Key", cleanKey)
+                .header("Accept", "application/json")
+                .get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "parlayapi:h2h_upcoming",
+                provider = PROVIDER_PARLAY_API,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentMonthlyWindow(),
+                hardLimit = 850,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyMap()
+            val result = parseParlayApiPayload(body)
+            if (!cachedRes.fromCache) setStatus(PROVIDER_PARLAY_API, "OK (${result.size} events)")
+            result
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_PARLAY_API, "Error: ${sanitizeError(e)}")
+            emptyMap()
+        }
+    }
+
+    internal fun parseParlayApiPayload(body: String): Map<String, List<BookmakerOddsLine>> {
+        val root = runCatching { json.parseToJsonElement(body) }.getOrNull() ?: return emptyMap()
+        val arr = when (root) {
+            is JsonArray -> root
+            is JsonObject -> root.arrayOrNull("data") ?: root.arrayOrNull("events") ?: return emptyMap()
+            else -> return emptyMap()
+        }
+        val out = LinkedHashMap<String, List<BookmakerOddsLine>>()
+        for (elem in arr) {
+            val ev = elem as? JsonObject ?: continue
+            val rawHome = ev.stringOrNull("home_team")?.trim().orEmpty()
+            val rawAway = ev.stringOrNull("away_team")?.trim().orEmpty()
+            if (rawHome.isBlank() || rawAway.isBlank()) continue
+            val oh = ev.doubleOrNull("home_odds")?.takeIf { it > 1.0 && it < 1000.0 } ?: continue
+            val oa = ev.doubleOrNull("away_odds")?.takeIf { it > 1.0 && it < 1000.0 } ?: continue
+            val od = ev.doubleOrNull("draw_odds")?.takeIf { it > 1.0 && it < 1000.0 }
+            val book = ev.stringOrNull("bookmaker")?.takeIf { it.isNotBlank() } ?: "ParlayAPI Consensus"
+            out[normalizeMatchKey(rawHome, rawAway)] = listOf(
+                BookmakerOddsLine(bookmaker = book, isSharp = isSharpBookmaker(book), homeOdds = oh, drawOdds = od, awayOdds = oa, updatedLabel = "ParlayAPI")
+            )
+        }
+        return out
+    }
+
+    suspend fun fetchCfbdLines(apiKey: String, year: Int): Map<String, List<BookmakerOddsLine>> {
+        val cleanKey = sanitizeKey(apiKey)
+        if (cleanKey.isBlank()) {
+            setStatus(PROVIDER_CFBD, "Not configured")
+            return emptyMap()
+        }
+        return try {
+            val url = "https://api.collegefootballdata.com/lines?year=$year"
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $cleanKey")
+                .header("Accept", "application/json")
+                .get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "cfbd:lines:$year",
+                provider = PROVIDER_CFBD,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_12_HOURS_MS,
+                windowKey = currentMonthlyWindow(),
+                hardLimit = 750, // Shared 1,000/mo pool with CBBD -> strict 750 cap
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyMap()
+            val result = parseCfbdLinesPayload(body)
+            if (!cachedRes.fromCache) setStatus(PROVIDER_CFBD, "OK (${result.size} NCAAF lines)")
+            result
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_CFBD, "Error: ${sanitizeError(e)}")
+            emptyMap()
+        }
+    }
+
+    internal fun parseCfbdLinesPayload(body: String): Map<String, List<BookmakerOddsLine>> {
+        val arr = runCatching { json.parseToJsonElement(body) as? JsonArray }.getOrNull() ?: return emptyMap()
+        val out = LinkedHashMap<String, List<BookmakerOddsLine>>()
+        for (elem in arr) {
+            val g = elem as? JsonObject ?: continue
+            val home = g.stringOrNull("homeTeam")?.trim().orEmpty()
+            val away = g.stringOrNull("awayTeam")?.trim().orEmpty()
+            if (home.isBlank() || away.isBlank()) continue
+            val linesArr = g.arrayOrNull("lines") ?: continue
+            val books = mutableListOf<BookmakerOddsLine>()
+            for (lElem in linesArr) {
+                val lObj = lElem as? JsonObject ?: continue
+                val prov = lObj.stringOrNull("provider")?.takeIf { it.isNotBlank() } ?: "CFBD Consensus"
+                val hMl = lObj.doubleOrNull("homeMoneyline") ?: continue
+                val aMl = lObj.doubleOrNull("awayMoneyline") ?: continue
+                val oh = com.edgeledger.app.engine.OddsMath.americanToDecimalOrNull(hMl) ?: continue
+                val oa = com.edgeledger.app.engine.OddsMath.americanToDecimalOrNull(aMl) ?: continue
+                books.add(BookmakerOddsLine(prov, isSharpBookmaker(prov), oh, null, oa, "CFBD"))
+            }
+            if (books.isNotEmpty()) out[normalizeMatchKey(home, away)] = books
+        }
+        return out
+    }
+
     fun getQuotaSummary(
         keys: UserApiKeys,
         persistedQuotas: List<ApiQuotaEntity> = emptyList(),
@@ -1120,6 +1570,11 @@ class OptionalOddsAndDataClient(
             buildQuotaStatus(PROVIDER_OPENWEATHER, "1000/day (3h cache)", keys.openWeatherApiKey.isNotBlank(), byProvider[PROVIDER_OPENWEATHER]),
             buildQuotaStatus(PROVIDER_KALSHI, "Keyless (public)", keys.enableKalshi, byProvider[PROVIDER_KALSHI]),
             buildQuotaStatus(PROVIDER_MANIFOLD, "Keyless (public)", keys.enableManifold, byProvider[PROVIDER_MANIFOLD]),
+            buildQuotaStatus(PROVIDER_SX_BET, "Keyless (27.5K/5m)", keys.enableSxBet, byProvider[PROVIDER_SX_BET]),
+            buildQuotaStatus(PROVIDER_PREDICTION_BUBBLES, "Keyless (15m JSON)", keys.enablePredictionBubbles, byProvider[PROVIDER_PREDICTION_BUBBLES]),
+            buildQuotaStatus(PROVIDER_SPORTSGAMEODDS, "2,500 objs/mo (6h cache)", keys.sportsGameOddsKey.isNotBlank(), byProvider[PROVIDER_SPORTSGAMEODDS]),
+            buildQuotaStatus(PROVIDER_PARLAY_API, "1,000 cr/mo (6h cache)", keys.parlayApiKey.isNotBlank(), byProvider[PROVIDER_PARLAY_API]),
+            buildQuotaStatus(PROVIDER_CFBD, "1,000/mo shared (12h cache)", keys.cfbdApiKey.isNotBlank(), byProvider[PROVIDER_CFBD]),
         )
     }
 
@@ -1289,6 +1744,11 @@ class OptionalOddsAndDataClient(
         const val PROVIDER_BALLDONTLIE = "Balldontlie.io"
         const val PROVIDER_LIVE_TENNIS = "Live Tennis API"
         const val PROVIDER_OPENWEATHER = "OpenWeatherMap"
+        const val PROVIDER_SX_BET = "SX Bet V3"
+        const val PROVIDER_PREDICTION_BUBBLES = "PredictionBubbles"
+        const val PROVIDER_SPORTSGAMEODDS = "SportsGameOdds"
+        const val PROVIDER_PARLAY_API = "ParlayAPI"
+        const val PROVIDER_CFBD = "CFBD / CBBD"
         const val TTL_30_MIN_MS = 30L * 60_000L
         const val TTL_6_HOURS_MS = 6L * 3_600_000L
         private val KALSHI_SPORTS_SERIES = listOf(
@@ -1311,6 +1771,11 @@ class OptionalOddsAndDataClient(
             "betcris",
             "polymarket",
             "kalshi",
+            "sxbet",
+            "azuro",
+            "novig",
+            "prophetx",
+            "sportsgameodds fair",
         )
 
         private val FOOTBALL_DATA_CODE_MAP = mapOf(
@@ -1331,7 +1796,7 @@ class OptionalOddsAndDataClient(
         )
 
         private val WHITESPACE_REGEX = Regex("\\s+")
-        private val SECRET_QUERY_REGEX = Regex("(?i)(apiKey|apikey|token|key)(=|%3D)[^&\\s]+")
+        private val SECRET_QUERY_REGEX = Regex("(?i)(apiKey|appid|token|key)(=|%3D)[^&\\s]+")
         private val SPORTS_KEYWORD_REGEX = Regex("\\b(nba|nfl|nhl|mlb|wnba|mls|ncaa|march madness|premier league|champions league|europa league|fa cup|la liga|bundesliga|serie a|ligue 1|world cup|super bowl|stanley cup|world series|nba finals|ufc|mma|boxing|formula 1|grand prix|atp|wta|wimbledon|us open|pga|golf|rugby|cricket|ipl|kxnfl|kxnba|kxnhl|kxmlb|kxepl|kxucl|kxufc|kxatp|kxf1|kxsoccer|playoffs|touchdown|home run)\\b")
     }
 }

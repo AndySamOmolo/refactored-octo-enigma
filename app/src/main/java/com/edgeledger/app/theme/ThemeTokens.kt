@@ -512,10 +512,10 @@ object ThemeCodec {
                 for ((key, value) in element) {
                     when (key) {
                         "mode" -> {
-                            val rawMode = value.jsonPrimitive.contentOrNull?.trim()?.uppercase()
-                            val normalizedMode = when (rawMode) {
-                                "COLORBLIND", "COLOR_BLIND", "COLOR-BLIND" -> ThemeMode.DEUTERANOPIA.name
-                                in validThemeModes -> rawMode!!
+                            val rawMode = value.jsonPrimitive.contentOrNull?.trim()?.uppercase(java.util.Locale.ROOT)
+                            val normalizedMode = when {
+                                rawMode == "COLORBLIND" || rawMode == "COLOR_BLIND" || rawMode == "COLOR-BLIND" -> ThemeMode.DEUTERANOPIA.name
+                                rawMode != null && rawMode in validThemeModes -> rawMode
                                 else -> ThemeMode.DARK.name
                             }
                             put(key, JsonPrimitive(normalizedMode))

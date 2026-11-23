@@ -14,6 +14,10 @@ enum class Sport(val label: String, val shortCode: String, val hasDraw: Boolean)
     CRICKET("Cricket", "CRI", false),
     F1("Formula 1", "F1", false),
     MMA("MMA / UFC", "MMA", false),
+    RUGBY("Rugby", "RUG", true),
+    AFL("AFL", "AFL", false),
+    ESPORTS("Esports", "ESP", false),
+    GOLF("Golf", "GLF", false),
 }
 
 @Serializable
@@ -218,7 +222,7 @@ data class FullMatchMarkets(
     val probHome: Double,
     val probDraw: Double,
     val probAway: Double,
-    val modelVersion: String = "v8.0.0",
+    val modelVersion: String = "v8.7.0",
     val doubleChanceHomeOrDrawPct: Int = 0,
     val doubleChanceAwayOrDrawPct: Int = 0,
     val drawNoBetHomePct: Int = 0,
@@ -298,9 +302,9 @@ data class MatchFixture(
     val awayTeam: String,
     val surface: String? = null,
     val markets: FullMatchMarkets,
-    val plainInsights: List<String>,
-    val bookmakerOdds: List<BookmakerOddsLine>,
-    val h2hGames: List<HeadToHeadGame>,
+    val plainInsights: List<String> = emptyList(),
+    val bookmakerOdds: List<BookmakerOddsLine> = emptyList(),
+    val h2hGames: List<HeadToHeadGame> = emptyList(),
     val weather: StadiumWeather? = null,
     val bestValueLabel: String? = null,
     val bestValueEdgePct: Double? = null,
@@ -334,7 +338,10 @@ data class LeagueTrackRecord(
     val beatsSimpleGuess: Boolean,
     val simulatedProfitPct: Double,
     val hasGradedOdds: Boolean = true,
-    val reliabilityBins: List<ReliabilityBin>,
+    val reliabilityBins: List<ReliabilityBin> = emptyList(),
+    val logLoss: Double = 0.0,
+    val rps: Double = 0.0,
+    val ecePct: Double = 0.0,
 )
 
 @Immutable

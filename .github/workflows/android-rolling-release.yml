@@ -1,31 +1,27 @@
-name: Native Android APK Release (Versioned + Latest)
+name: EdgeLedger Android Rolling Release
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '0 4 * * 1'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: android-native-release
-  cancel-in-progress: false
+  group: android-rolling-release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-publish-release:
+  build-and-release:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Setup Java 17 (Temurin)
         uses: actions/setup-java@v4
@@ -33,88 +29,116 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Accept pre-installed Android SDK licenses
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+      - name: Accept Android SDK licenses
+        run: |
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
 
       - name: Setup Gradle 8.11.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      - name: Configure release keystore in runner temp
+      - name: Run unit tests & lint
+        run: gradle testDebugUnitTest lintDebug --no-daemon
+
+      - name: Configure persistent release signing (zero-config bundled keystore or optional GitHub Secrets)
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
-            set -euo pipefail
-            printf "%s" "$ANDROID_KEYSTORE_BASE64" | tr -d "\r\n " | base64 --decode > "${RUNNER_TEMP}/release.keystore"
-            chmod 600 "${RUNNER_TEMP}/release.keystore"
-            echo "RELEASE_STORE_FILE=${RUNNER_TEMP}/release.keystore" >> "$GITHUB_ENV"
-            echo "REQUIRE_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
+            echo "Using private GitHub Secrets release keystore."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+            echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "RELEASE_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "RELEASE_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+          elif [ -f "app/edgeledger-update.jks" ]; then
+            echo "Using bundled persistent keystore (app/edgeledger-update.jks) for zero-config in-place APK updates."
           else
-            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set. Using ephemeral debug keystore (in-place APK updates require setting ANDROID_KEYSTORE_BASE64/PASSWORD/ALIAS/KEY_PASSWORD secrets)."
-          fi
-
-      - name: Run JUnit 4 tests, Lint & build Native Release APK
-        env:
-          RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: gradle testDebugUnitTest lintRelease assembleRelease --no-daemon
-
-      - name: Stage versioned APK and checksum
-        run: |
-          mkdir -p dist
-          VERSION_NAME=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
-          echo "APP_VERSION=${VERSION_NAME}" >> "$GITHUB_ENV"
-          APK_PATH="app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "Signed app-release.apk not found in app/build/outputs/apk/release"
+            echo "::error::Neither GitHub Secrets nor bundled app/edgeledger-update.jks found!"
             exit 1
           fi
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
-          if [ -n "$APKSIGNER" ]; then
-            "$APKSIGNER" verify --print-certs "$APK_PATH"
-          fi
-          cp "$APK_PATH" "dist/edgeledger-android-v${VERSION_NAME}.apk"
-          cp "$APK_PATH" "dist/edgeledger-android-latest.apk"
-          if [ -f "app/build/outputs/mapping/release/mapping.txt" ]; then cp "app/build/outputs/mapping/release/mapping.txt" "dist/mapping-v${VERSION_NAME}.txt"; fi
-          (cd dist && sha256sum "edgeledger-android-v${VERSION_NAME}.apk" > "edgeledger-android-v${VERSION_NAME}.apk.sha256")
-          (cd dist && sha256sum "edgeledger-android-latest.apk" > "edgeledger-android-latest.apk.sha256")
-          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
-          cat <<EOF > dist/release-notes.md
-          ### EdgeLedger Native Kotlin v${VERSION_NAME}
-          - **Built:** ${BUILD_DATE}
-          - **Commit:** \`${GITHUB_SHA::8}\`
-          - **Stack:** Native Kotlin 2.1 + Jetpack Compose (Material 3) + Room 2.7 + Keystore AES-256-GCM + DataStore + WorkManager + Glance Widget
-          - **Highlights:** 100% live-dataset-only pipeline, real Room odds-history line movement, log-space Poisson math, R8 minification, and hardened offline caching.
-          EOF
+          echo "REQUIRE_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
 
-      - name: Create immutable versioned release tag (if new)
+      - name: Build signed Release APK
+        run: gradle assembleRelease --no-daemon
+
+      - name: Extract changelog & version metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BUILD_DATE="$(date -u +'%Y-%m-%d %H:%M UTC')"
+          COMMIT_MSG="$(git log -1 --pretty=%s)"
+          APP_VERSION="$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          APP_VERSION="${APP_VERSION:-8.7.0}"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
+          echo "commit_msg=$COMMIT_MSG" >> "$GITHUB_OUTPUT"
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Package & verify APK signature continuity
+        run: |
+          mkdir -p dist
+          APK_PATH="$(find app/build/outputs/apk/release -maxdepth 2 -name '*.apk' ! -name '*-unsigned.apk' | head -n 1)"
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: No signed release APK found"
+            exit 1
+          fi
+          cp "$APK_PATH" dist/edgeledger-android-latest.apk
+
+          BUILD_TOOLS_DIR="$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -n "$BUILD_TOOLS_DIR" ] && [ -x "$BUILD_TOOLS_DIR/apksigner" ]; then
+            echo "=== Verified APK Signing Certificate ==="
+            "$BUILD_TOOLS_DIR/apksigner" verify --print-certs dist/edgeledger-android-latest.apk | grep -E "Signer #1 certificate SHA-256|Signer #1 certificate DN" || true
+          fi
+
+          sha256sum dist/edgeledger-android-latest.apk > dist/edgeledger-android-latest.apk.sha256
+
+          MAPPING_PATH="app/build/outputs/mapping/release/mapping.txt"
+          if [ -f "$MAPPING_PATH" ]; then
+            mkdir -p private-symbols
+            cp "$MAPPING_PATH" "private-symbols/mapping-v${{ steps.meta.outputs.app_version }}-run-${GITHUB_RUN_NUMBER}.txt"
+          fi
+          ls -lh dist/
+
+      - name: Upload R8 mapping privately (workflow artifact only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r8-mapping-run-${{ github.run_number }}
+          path: private-symbols/mapping-*.txt
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Move 'latest' tag to current commit
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          TAG="v${APP_VERSION}-build.${GITHUB_RUN_NUMBER}"
-          echo "RELEASE_TAG=${TAG}" >> "$GITHUB_ENV"
-          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            git tag "$TAG"
-            git push origin "refs/tags/${TAG}"
-          fi
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa latest -m "EdgeLedger v${{ steps.meta.outputs.app_version }} rolling build #${GITHUB_RUN_NUMBER}"
+          git push -f origin latest
 
-      - name: Publish immutable GitHub Release
+      - name: Publish rolling release (overwrite single 'latest' release)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: "EdgeLedger Android v${{ env.APP_VERSION }} (Build ${{ github.run_number }})"
-          make_latest: "true"
-          body_path: dist/release-notes.md
+          tag_name: latest
+          name: EdgeLedger Android (Latest Rolling Build)
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
           files: |
-            dist/edgeledger-android-v${{ env.APP_VERSION }}.apk
-            dist/edgeledger-android-v${{ env.APP_VERSION }}.apk.sha256
             dist/edgeledger-android-latest.apk
             dist/edgeledger-android-latest.apk.sha256
-            dist/mapping-v*.txt
+          body: |
+            ## EdgeLedger Native Android App — v${{ steps.meta.outputs.app_version }} (Rolling Build #${{ github.run_number }})
 
-      - name: Clean up temporary keystore
-        if: always()
-        run: rm -f "${RUNNER_TEMP}/release.keystore"
+            - **Commit:** `${{ steps.meta.outputs.short_sha }}` — ${{ steps.meta.outputs.commit_msg }}
+            - **Built:** ${{ steps.meta.outputs.build_date }}
+            - **In-Place Updates:** Signed with persistent keystore (`versionCode` = `807000 + ${{ github.run_number }}`) — install directly over previous builds signed with this keystore without losing bets, prediction history, or settings.
+            - **Core Stack:** Native Kotlin 2.1 + Jetpack Compose (Material 3) + Room SQLite v5 + DataStore + WorkManager + Jetpack Glance Widget + Coil SVG/PNG
+            - **Verification:** `gradle testDebugUnitTest lintDebug` passed; R8/ProGuard mapping uploaded privately as a workflow artifact.

@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -142,6 +143,7 @@ fun MatchDetailScreen(
                 mode = prefs.stakingMode,
                 kellyFraction = prefs.riskStyle.kellyFraction,
                 maxCap = prefs.riskStyle.maxStakePct,
+                flatUnitAmount = prefs.flatUnitAmount,
             )
             val fallbackUnit = (activeBankroll * 0.01).coerceIn(1.0, activeBankroll)
             val stake = (if (computed > 0.0) computed else fallbackUnit).roundToInt().coerceAtLeast(1).toDouble()
@@ -498,6 +500,7 @@ fun MatchDetailScreen(
                                 mode = prefs.stakingMode,
                                 kellyFraction = prefs.riskStyle.kellyFraction,
                                 maxCap = prefs.riskStyle.maxStakePct,
+                flatUnitAmount = prefs.flatUnitAmount,
                             )
                         } else 0.0
                         val dollars = recStake.roundToInt()

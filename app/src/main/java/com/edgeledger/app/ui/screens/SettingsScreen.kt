@@ -1,7 +1,9 @@
 package com.edgeledger.app.ui.screens
 
-import android.content.Intent
+import android.Manifest
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -92,7 +94,9 @@ import com.edgeledger.app.ui.components.TeamAvatar
 import com.edgeledger.app.ui.components.SegmentedTabs
 import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.scaledSp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -114,6 +118,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     }
     val syncing by app.syncRepo.syncing.collectAsStateWithLifecycle()
     val persistErr by app.prefsRepo.persistenceError.collectAsStateWithLifecycle()
+    val diagnostics by app.recentDiagnostics.collectAsStateWithLifecycle()
 
     var sectionTab by rememberSaveable { mutableIntStateOf(0) }
     var advancedMode by rememberSaveable { mutableStateOf(false) }
@@ -122,6 +127,37 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     var customThemeName by rememberSaveable { mutableStateOf("") }
     var importJsonText by remember { mutableStateOf("") }
     var statusMsg by remember { mutableStateOf<String?>(null) }
+    var flatUnitInput by rememberSaveable(prefs.flatUnitAmount) { mutableStateOf(String.format(Locale.US, "%.0f", prefs.flatUnitAmount)) }
+
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            statusMsg = "Notification permission denied; enable it in Android settings to receive +EV alerts."
+        }
+    }
+
+    val themeExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri != null) {
+            val jsonStr = app.prefsRepo.exportThemeJson()
+            app.appScope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    val stream = context.contentResolver.openOutputStream(uri)
+                        ?: error("Could not open output stream")
+                    stream.use { os -> os.write(jsonStr.toByteArray(Charsets.UTF_8)) }
+                }
+                withContext(Dispatchers.Main) {
+                    statusMsg = if (result.isSuccess) {
+                        "Saved .theme.json to device storage."
+                    } else {
+                        "Could not save .theme.json file."
+                    }
+                }
+            }
+        }
+    }
 
     var oddsApiInput by rememberSaveable(apiKeys.theOddsApiKey) { mutableStateOf(apiKeys.theOddsApiKey) }
     var fdOrgInput by rememberSaveable(apiKeys.footballDataOrgKey) { mutableStateOf(apiKeys.footballDataOrgKey) }
@@ -131,6 +167,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     var balldontlieInput by rememberSaveable(apiKeys.balldontlieKey) { mutableStateOf(apiKeys.balldontlieKey) }
     var liveTennisInput by rememberSaveable(apiKeys.liveTennisApiKey) { mutableStateOf(apiKeys.liveTennisApiKey) }
     var openWeatherInput by rememberSaveable(apiKeys.openWeatherApiKey) { mutableStateOf(apiKeys.openWeatherApiKey) }
+    var sportsGameOddsInput by rememberSaveable(apiKeys.sportsGameOddsKey) { mutableStateOf(apiKeys.sportsGameOddsKey) }
+    var parlayApiInput by rememberSaveable(apiKeys.parlayApiKey) { mutableStateOf(apiKeys.parlayApiKey) }
+    var cfbdInput by rememberSaveable(apiKeys.cfbdApiKey) { mutableStateOf(apiKeys.cfbdApiKey) }
 
     var balanceInput by remember(prefs.bankroll) { mutableStateOf(prefs.bankroll.toInt().toString()) }
     var paperInput by remember(prefs.paperBankroll) { mutableStateOf(prefs.paperBankroll.toInt().toString()) }
@@ -653,19 +692,11 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         }
 
                         Button(
-                            onClick = {
-                                val jsonStr = app.prefsRepo.exportThemeJson()
-                                val intent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Theme (.theme.json)")
-                                    putExtra(Intent.EXTRA_TEXT, jsonStr)
-                                }
-                                runCatching { context.startActivity(Intent.createChooser(intent, "Share Theme JSON")) }.onFailure { statusMsg = "No share app available on device." }
-                            },
+                            onClick = { themeExportLauncher.launch("edgeledger-theme.theme.json") },
                             colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
                             shape = tokens.shapes.button,
                             modifier = Modifier.fillMaxWidth(),
-                        ) { Text("Export / Share .theme.json", fontWeight = FontWeight.ExtraBold) }
+                        ) { Text("Save .theme.json Backup", fontWeight = FontWeight.ExtraBold) }
 
                         OutlinedTextField(
                             value = importJsonText,
@@ -687,7 +718,14 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Import Theme JSON", color = c.accent, fontWeight = FontWeight.Bold) }
 
-                        Text("Tip: Long-press the Settings icon on the bottom bar at any time for Safe Mode reset.", color = c.textMuted, fontSize = scaledSp(11f))
+                        OutlinedButton(
+                            onClick = {
+                                app.prefsRepo.resetTheme()
+                                statusMsg = "Safe Mode: Theme reset to Midnight Broadcast."
+                            },
+                            shape = tokens.shapes.button,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Safe Mode: Reset Theme to Default", color = c.textSecondary, fontWeight = FontWeight.Bold) }
                     }
                 }
             }
@@ -710,6 +748,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         SettingsApiKeyField("Balldontlie.io", "Free tier · NBA, NFL, MLB, NHL & EPL games & teams", balldontlieInput) { balldontlieInput = it }
                         SettingsApiKeyField("Live Tennis API", "100 req/day · Live ATP & WTA fixtures, scores & rankings", liveTennisInput) { liveTennisInput = it }
                         SettingsApiKeyField("OpenWeatherMap", "1,000 req/day · Stadium weather backup alongside Open-Meteo", openWeatherInput) { openWeatherInput = it }
+                        SettingsApiKeyField("SportsGameOdds", "2,500 game objs/mo · 9 US/global books + Fair Odds (1 game = 1 obj)", sportsGameOddsInput) { sportsGameOddsInput = it }
+                        SettingsApiKeyField("ParlayAPI", "1,000 credits/mo · 30+ sportsbooks, +EV, arbitrage & consensus", parlayApiInput) { parlayApiInput = it }
+                        SettingsApiKeyField("CFBD / CBBD", "1,000 calls/mo shared · NCAAF & NCAAB lines, SP+, Elo & EPA", cfbdInput) { cfbdInput = it }
 
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -732,6 +773,20 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             }
                             Switch(checked = apiKeys.enableManifold, onCheckedChange = { v -> app.prefsRepo.updateApiKeys { it.copy(enableManifold = v) } })
                         }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("SX Bet V3 Exchange (Keyless)", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f))
+                                Text("P2P decentralized sports exchange orderbook odds", color = c.textMuted, fontSize = scaledSp(11.5f))
+                            }
+                            Switch(checked = apiKeys.enableSxBet, onCheckedChange = { v -> app.prefsRepo.updateApiKeys { it.copy(enableSxBet = v) } })
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("PredictionBubbles Feed (Keyless)", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f))
+                                Text("Unified 15-min Polymarket & Kalshi sports feed", color = c.textMuted, fontSize = scaledSp(11.5f))
+                            }
+                            Switch(checked = apiKeys.enablePredictionBubbles, onCheckedChange = { v -> app.prefsRepo.updateApiKeys { it.copy(enablePredictionBubbles = v) } })
+                        }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             Button(
@@ -746,6 +801,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                             balldontlieKey = balldontlieInput.trim(),
                                             liveTennisApiKey = liveTennisInput.trim(),
                                             openWeatherApiKey = openWeatherInput.trim(),
+                                            sportsGameOddsKey = sportsGameOddsInput.trim(),
+                                            parlayApiKey = parlayApiInput.trim(),
+                                            cfbdApiKey = cfbdInput.trim(),
                                         )
                                     }
                                     app.syncRepo.refreshQuotaSummary()
@@ -768,6 +826,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                             balldontlieKey = balldontlieInput.trim(),
                                             liveTennisApiKey = liveTennisInput.trim(),
                                             openWeatherApiKey = openWeatherInput.trim(),
+                                            sportsGameOddsKey = sportsGameOddsInput.trim(),
+                                            parlayApiKey = parlayApiInput.trim(),
+                                            cfbdApiKey = cfbdInput.trim(),
                                         )
                                     }
                                     statusMsg = "Keys saved! Syncing live feeds..."
@@ -823,6 +884,28 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier.weight(1f),
                             )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = flatUnitInput,
+                                onValueChange = { flatUnitInput = it },
+                                label = { Text("Flat Unit Stake ($)") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedButton(
+                                onClick = {
+                                    val amt = flatUnitInput.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 1.0 }
+                                    if (amt != null) {
+                                        app.prefsRepo.updatePrefs { it.copy(flatUnitAmount = amt) }
+                                        statusMsg = "Flat unit stake updated to $${String.format(Locale.US, "%.0f", amt)}."
+                                    } else {
+                                        statusMsg = "Enter a valid flat unit amount (>= 1)."
+                                    }
+                                },
+                                shape = tokens.shapes.button,
+                            ) { Text("Save Unit", color = c.accent, fontWeight = FontWeight.Bold) }
                         }
                         Button(
                             onClick = {
@@ -914,7 +997,12 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                 Text("Local Value & Steam Flags", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13.5f))
                                 Text("Highlights games exceeding +${String.format(Locale.US, "%.1f", prefs.minEvPct)}% value edge or >=3% steam moves.", color = c.textMuted, fontSize = scaledSp(12f))
                             }
-                            Switch(checked = prefs.alertsEnabled, onCheckedChange = { v -> app.prefsRepo.updatePrefs { it.copy(alertsEnabled = v) } })
+                            Switch(checked = prefs.alertsEnabled, onCheckedChange = { v ->
+                                app.prefsRepo.updatePrefs { it.copy(alertsEnabled = v) }
+                                if (v && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            })
                         }
                         Text(
                             String.format(Locale.US, "Quiet Hours: %02d:00 – %02d:00 (30 min cooldown)", prefs.quietHoursStart, prefs.quietHoursEnd),
@@ -943,15 +1031,16 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                     SectionCard {
                         Text("Open-Source & Free Data Credits", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
                         val credits = listOf(
-                            "Football-Data.co.uk — Historical European football results, shots, corners, cards & bookmaker odds",
-                            "Football-Data.org API — Football data provided by the Football-Data.org API (optional user token)",
-                            "ClubElo — Free public European club Elo ratings CSV API",
-                            "nflverse (CC-BY 4.0 / CC-BY-SA 4.0) — NFL schedules, spreads, totals & rest-day datasets",
-                            "Open-Meteo (CC BY 4.0) — Free stadium kickoff weather forecasts",
-                            "Official NHL Web API & MLB Stats API — Public schedules & game feeds",
-                            "TennisMyLife ATP Database — Free historical ATP match & serve statistics",
-                            "Polymarket & Kalshi — Public read-only sports prediction market probabilities",
-                            "The Odds API, OddsPapi, CricketData.org & API-Sports — Optional personal free-tier keys",
+                            "Football-Data.co.uk — 38 European & global football leagues with shots, corners, cards & bookmaker odds",
+                            "olbauday/FPL-Core-Insights, FPL Bootstrap & World Football Elo (eloratings.net) — Club/international Elo & EPL injuries",
+                            "OpenLigaDB (ODbL 1.0) — Bundesliga, 2. Bundesliga, 3. Liga & DFB-Pokal matchday feeds",
+                            "nflverse (CC-BY 4.0 / CC-BY-SA 4.0) — NFL games, spreads, totals, rest days & weekly injury reports",
+                            "MoneyPuck, Official NHL Web API & MLB Stats API — NHL shot-level xG, live schedules & standings",
+                            "TennisMyLife ATP Database & Tennis Abstract — ATP match history plus weekly ATP/WTA surface Elo",
+                            "Greco1899/scrape_ufc_stats, Squiggle AFL, OpenDota & henrygd/ncaa-api — Keyless MMA, AFL, Dota 2 & NCAA feeds",
+                            "Open-Meteo (CC BY 4.0) — Free stadium kickoff weather across 89 football, NFL & MLB venues",
+                            "Polymarket, Kalshi, Manifold, SX Bet V3 & PredictionBubbles — Public sports exchange probabilities",
+                            "The Odds API, SportsGameOdds, ParlayAPI, CFBD/CBBD, OddsPapi, Football-Data.org, CricketData.org & API-Sports — Optional free-tier keys",
                         )
                         credits.forEach { line ->
                             Text("• $line", color = c.textSecondary, fontSize = scaledSp(12f))
@@ -962,6 +1051,39 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             fontSize = scaledSp(11.5f),
                             fontWeight = FontWeight.SemiBold,
                         )
+                    }
+                }
+
+                item {
+                    SectionCard {
+                        Text("Informational Analytics & Responsible Play", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(15f))
+                        Text(
+                            "EdgeLedger is strictly an informational sports analytics and personal tracking tool. It does not accept wagers, process deposits, or broker bets. All probability estimates are statistical models and carry uncertainty — never risk money you cannot afford to lose.",
+                            color = c.textSecondary,
+                            fontSize = scaledSp(12f),
+                        )
+                    }
+                }
+
+                if (diagnostics.isNotEmpty()) {
+                    item {
+                        SectionCard {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("Recent Diagnostics (${diagnostics.size})", color = c.text, fontWeight = FontWeight.ExtraBold, fontSize = scaledSp(14.5f))
+                                OutlinedButton(
+                                    onClick = { app.clearDiagnostics() },
+                                    shape = tokens.shapes.button,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                ) { Text("Clear", fontSize = scaledSp(12f)) }
+                            }
+                            diagnostics.take(8).forEach { entry ->
+                                Text(entry, color = c.textMuted, fontSize = scaledSp(12f))
+                            }
+                        }
                     }
                 }
             }

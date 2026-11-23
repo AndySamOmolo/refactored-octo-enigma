@@ -21,6 +21,7 @@ import com.edgeledger.app.model.StakingMode
 import com.edgeledger.app.theme.ThemeCodec
 import com.edgeledger.app.theme.ThemeConfigV1
 import com.edgeledger.app.theme.ThemePresets
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +44,7 @@ import java.security.GeneralSecurityException
 import java.security.InvalidKeyException
 import java.security.KeyStore
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -65,6 +67,7 @@ private object KeystoreAesGcm {
     private const val IV_BYTES = 12
     private const val PREFIX = "ENC_GCM_V1:"
 
+    @Synchronized
     private fun getOrCreateKey(forceRecreate: Boolean = false): SecretKey {
         val ks = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         if (forceRecreate && ks.containsAlias(KEY_ALIAS)) {
@@ -127,6 +130,7 @@ data class AppUserPrefs(
     val paperBankroll: Double = 1000.0,
     val isPaperTrading: Boolean = false,
     val stakingMode: StakingMode = StakingMode.FRACTIONAL_KELLY,
+    val flatUnitAmount: Double = 20.0,
     val riskStyle: RiskStyle = RiskStyle.BALANCED,
     val oddsFormat: OddsDisplayFormat = OddsDisplayFormat.DECIMAL,
     val devigMethod: DevigMethod = DevigMethod.SHIN,
@@ -143,6 +147,7 @@ data class AppUserPrefs(
     fun sanitized(): AppUserPrefs = copy(
         bankroll = bankroll.takeIf { it.isFinite() }?.coerceIn(1.0, 10_000_000.0) ?: 1000.0,
         paperBankroll = paperBankroll.takeIf { it.isFinite() }?.coerceIn(1.0, 10_000_000.0) ?: 1000.0,
+        flatUnitAmount = flatUnitAmount.takeIf { it.isFinite() }?.coerceIn(1.0, 100_000.0) ?: 20.0,
         minEvPct = minEvPct.takeIf { it.isFinite() }?.coerceIn(-10.0, 50.0) ?: 2.0,
         minProbFloorPct = minProbFloorPct.coerceIn(1, 95),
         marketBlendWeight = marketBlendWeight.takeIf { it.isFinite() }?.coerceIn(0.0, 0.5) ?: 0.0,
@@ -164,6 +169,7 @@ class ThemeAndPrefsRepository(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     private val writeMutex = Mutex()
     private val undoLock = Any()
+    private val mutatedBeforeInit = ConcurrentHashMap.newKeySet<String>()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -179,6 +185,7 @@ class ThemeAndPrefsRepository(context: Context) {
     private val KEY_PAPER_BANKROLL = doublePreferencesKey("paper_bankroll")
     private val KEY_IS_PAPER = booleanPreferencesKey("is_paper_trading")
     private val KEY_STAKING_MODE = stringPreferencesKey("staking_mode")
+    private val KEY_FLAT_UNIT = doublePreferencesKey("flat_unit_amount")
     private val KEY_RISK = stringPreferencesKey("risk_style")
     private val KEY_ODDS_FMT = stringPreferencesKey("odds_format")
     private val KEY_DEVIG = stringPreferencesKey("devig_method")
@@ -220,13 +227,13 @@ class ThemeAndPrefsRepository(context: Context) {
         scope.launch {
             try {
                 val p = appContext.dataStore.data.first()
-                p[KEY_THEME]?.let { ThemeCodec.decodeOrNull(it) }?.let { _theme.value = it }
+                if ("theme" !in mutatedBeforeInit) p[KEY_THEME]?.let { ThemeCodec.decodeOrNull(it) }?.let { _theme.value = it }
 
                 p[KEY_SAVED_THEMES]?.let { raw ->
                     runCatching {
                         val arr = json.parseToJsonElement(raw) as? JsonArray
                         arr?.mapNotNull { elem -> ThemeCodec.decodeOrNull(elem.toString()) } ?: emptyList()
-                    }.onSuccess { _savedThemes.value = it }
+                    }.onSuccess { if ("savedThemes" !in mutatedBeforeInit) _savedThemes.value = it }
                 }
 
                 p[KEY_API_KEYS]?.let { raw ->
@@ -240,7 +247,7 @@ class ThemeAndPrefsRepository(context: Context) {
                     if (!decrypted.isNullOrBlank()) {
                         runCatching { json.decodeFromString(UserApiKeys.serializer(), decrypted) }
                             .onSuccess { keys ->
-                                _apiKeys.value = keys
+                                if ("apiKeys" !in mutatedBeforeInit) _apiKeys.value = keys
                                 if (!KeystoreAesGcm.isEncrypted(raw)) {
                                     persistLatestApiKeysLocked()
                                 }
@@ -252,11 +259,12 @@ class ThemeAndPrefsRepository(context: Context) {
                     runCatching { json.decodeFromString(SetSerializer(String.serializer()), raw) }.getOrNull()
                 } ?: emptySet()
 
-                _prefs.value = AppUserPrefs(
+                if ("prefs" !in mutatedBeforeInit) _prefs.value = AppUserPrefs(
                     bankroll = p[KEY_BANKROLL] ?: 1000.0,
                     paperBankroll = p[KEY_PAPER_BANKROLL] ?: 1000.0,
                     isPaperTrading = p[KEY_IS_PAPER] ?: false,
                     stakingMode = runCatching { StakingMode.valueOf(p[KEY_STAKING_MODE] ?: "FRACTIONAL_KELLY") }.getOrDefault(StakingMode.FRACTIONAL_KELLY),
+                    flatUnitAmount = p[KEY_FLAT_UNIT] ?: 20.0,
                     riskStyle = runCatching { RiskStyle.valueOf(p[KEY_RISK] ?: "BALANCED") }.getOrDefault(RiskStyle.BALANCED),
                     oddsFormat = runCatching { OddsDisplayFormat.valueOf(p[KEY_ODDS_FMT] ?: "DECIMAL") }.getOrDefault(OddsDisplayFormat.DECIMAL),
                     devigMethod = runCatching { DevigMethod.valueOf(p[KEY_DEVIG] ?: "SHIN") }.getOrDefault(DevigMethod.SHIN),
@@ -270,6 +278,8 @@ class ThemeAndPrefsRepository(context: Context) {
                     quietHoursEnd = p[KEY_QUIET_END] ?: 7,
                     pinnedTeams = pinned,
                 ).sanitized()
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (e: Exception) {
                 Log.e("ThemeAndPrefsRepo", "Initial hydration error", e)
             } finally {
@@ -292,6 +302,7 @@ class ThemeAndPrefsRepository(context: Context) {
     }
 
     fun updateTheme(transform: (ThemeConfigV1) -> ThemeConfigV1) {
+        mutatedBeforeInit.add("theme")
         synchronized(undoLock) {
             val current = _theme.value
             val candidate = transform(current).sanitized()
@@ -332,6 +343,7 @@ class ThemeAndPrefsRepository(context: Context) {
     }
 
     fun saveCustomTheme(customName: String): Boolean {
+        mutatedBeforeInit.add("savedThemes")
         val wasAtCap = _savedThemes.value.size >= 16
         val cleanName = customName.trim().ifBlank { "My Custom Theme ${_savedThemes.value.size + 1}" }
         val custom = _theme.value.copy(
@@ -401,6 +413,8 @@ class ThemeAndPrefsRepository(context: Context) {
             } catch (e: GeneralSecurityException) {
                 Log.e("ThemeAndPrefsRepo", "Keystore encryption failed", e)
                 _persistenceError.value = "Could not encrypt API keys via Android Keystore. Please retry."
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (e: Exception) {
                 Log.e("ThemeAndPrefsRepo", "API key save failed", e)
                 _persistenceError.value = "Could not save API keys: ${e.message?.take(64) ?: "Unknown error"}"
@@ -409,6 +423,7 @@ class ThemeAndPrefsRepository(context: Context) {
     }
 
     fun updateApiKeys(transform: (UserApiKeys) -> UserApiKeys) {
+        mutatedBeforeInit.add("apiKeys")
         _apiKeys.update { current -> transform(current) }
         scope.launch {
             awaitLoaded()
@@ -426,6 +441,7 @@ class ThemeAndPrefsRepository(context: Context) {
     }
 
     fun updatePrefs(transform: (AppUserPrefs) -> AppUserPrefs) {
+        mutatedBeforeInit.add("prefs")
         var prevAuto = _prefs.value.autoSyncWeekly
         var prevWifi = _prefs.value.wifiOnlySync
         val next = _prefs.updateAndGet { current ->
@@ -444,6 +460,7 @@ class ThemeAndPrefsRepository(context: Context) {
                     it[KEY_PAPER_BANKROLL] = latest.paperBankroll
                     it[KEY_IS_PAPER] = latest.isPaperTrading
                     it[KEY_STAKING_MODE] = latest.stakingMode.name
+                    it[KEY_FLAT_UNIT] = latest.flatUnitAmount
                     it[KEY_RISK] = latest.riskStyle.name
                     it[KEY_ODDS_FMT] = latest.oddsFormat.name
                     it[KEY_DEVIG] = latest.devigMethod.name

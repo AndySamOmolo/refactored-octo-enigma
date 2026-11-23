@@ -350,6 +350,12 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
                                 subtitleColor = roiSubColor,
                             )
                         }
+                        if (rec.gamesTested > 0 && rec.logLoss > 0.0) {
+                            Text(
+                                text = "Log-Loss ${String.format(Locale.US, "%.3f", rec.logLoss)} · RPS ${String.format(Locale.US, "%.3f", rec.rps)} · ECE ${String.format(Locale.US, "%.1f", rec.ecePct)}%",
+                                style = tabularStyle(11f, FontWeight.SemiBold, c.textSecondary),
+                            )
+                        }
                         if (rec.reliabilityBins.isNotEmpty()) {
                             Text("Calibration: predicted % vs actual win %", color = c.textSecondary, fontSize = scaledSp(11.5f), fontWeight = FontWeight.SemiBold)
                             rec.reliabilityBins.forEach { bin ->

@@ -14,15 +14,16 @@ ksp {
 
 android {
     namespace = "com.edgeledger.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.edgeledger.app"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
-        versionCode = 806000 + ciRunNumber
-        versionName = "8.6.0"
+        val overrideVc = (project.findProperty("versionCodeOverride") as? String)?.toIntOrNull()
+        versionCode = overrideVc ?: (807000 + ciRunNumber)
+        versionName = "8.7.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -32,14 +33,24 @@ android {
             val storePass = System.getenv("RELEASE_STORE_PASSWORD")
             val alias = System.getenv("RELEASE_KEY_ALIAS")
             val keyPass = System.getenv("RELEASE_KEY_PASSWORD")
-            if (!storePath.isNullOrBlank() && file(storePath).exists()) {
-                require(!storePass.isNullOrBlank() && !alias.isNullOrBlank() && !keyPass.isNullOrBlank()) {
-                    "RELEASE_STORE_FILE is set, but RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, or RELEASE_KEY_PASSWORD is missing."
+            val bundledKeystore = file("edgeledger-update.jks")
+            when {
+                !storePath.isNullOrBlank() && file(storePath).exists() -> {
+                    require(!storePass.isNullOrBlank() && !alias.isNullOrBlank() && !keyPass.isNullOrBlank()) {
+                        "RELEASE_STORE_FILE is set, but RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, or RELEASE_KEY_PASSWORD is missing."
+                    }
+                    storeFile = file(storePath)
+                    storePassword = storePass
+                    keyAlias = alias
+                    keyPassword = keyPass
                 }
-                storeFile = file(storePath)
-                storePassword = storePass
-                keyAlias = alias
-                keyPassword = keyPass
+                bundledKeystore.exists() -> {
+                    // Persistent project keystore bundled for zero-config in-place APK updates
+                    storeFile = bundledKeystore
+                    storePassword = "edgeledger_inplace_v1"
+                    keyAlias = "edgeledger_update"
+                    keyPassword = "edgeledger_inplace_v1"
+                }
             }
         }
     }
@@ -56,7 +67,10 @@ android {
             signingConfig = when {
                 relConfig.storeFile != null -> relConfig
                 System.getenv("REQUIRE_RELEASE_SIGNING") == "true" ->
-                    throw GradleException("Release signing keystore is required (RELEASE_STORE_FILE missing).")
+                    throw GradleException(
+                        "Release signing keystore is required (RELEASE_STORE_FILE missing). " +
+                            "Run scripts/setup-release-keystore.sh and configure GitHub Actions secrets."
+                    )
                 else -> signingConfigs.getByName("debug")
             }
         }
@@ -79,8 +93,11 @@ android {
     }
 
     lint {
-        abortOnError = false
+        abortOnError = true
         checkReleaseBuilds = true
+        warningsAsErrors = false
+        // Allow external dependency version checks without failing offline/pinned CI
+        disable += setOf("GradleDependency", "NewerVersionAvailable")
     }
 }
 

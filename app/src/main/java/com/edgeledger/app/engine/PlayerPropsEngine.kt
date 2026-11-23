@@ -284,7 +284,7 @@ object PlayerPropsEngine {
                     id = "${fxPrefix}_${sideTag}_nfl_pass",
                     playerName = it.name,
                     team = team,
-                    position = "QB",
+                    position = qb.position.ifBlank { "QB" },
                     marketLabel = "Passing Yards",
                     lineLabel = String.format(Locale.US, "Over %.1f Yds", line),
                     projectedValue = round1(mean),
@@ -307,7 +307,7 @@ object PlayerPropsEngine {
                     id = "${fxPrefix}_${sideTag}_nfl_rush",
                     playerName = it.name,
                     team = team,
-                    position = "RB",
+                    position = rb.position.ifBlank { "RB" },
                     marketLabel = "Rushing Yards",
                     lineLabel = String.format(Locale.US, "Over %.1f Yds", line),
                     projectedValue = round1(mean),
@@ -383,7 +383,7 @@ object PlayerPropsEngine {
         fxPrefix: String,
         sideTag: String,
     ): List<PlayerPropPrediction> {
-        val hitters = players.filterNot { it.position.uppercase(Locale.US) in setOf("P", "SP", "RP") }.take(2)
+        val hitters = players.filterNot { it.position.uppercase(Locale.US) in setOf("P", "SP", "RP", "RHP", "LHP") }.take(2)
         return hitters.mapIndexed { idx, p ->
             val tbMean = ((1.45 - idx * 0.15) * (teamRuns / 4.3).coerceIn(0.75, 1.35)).coerceIn(0.7, 2.8)
             val line = centeredHalfLine(tbMean)
@@ -471,7 +471,7 @@ object PlayerPropsEngine {
             )
         }
 
-        if (sport != Sport.TENNIS && sport != Sport.F1 && sport != Sport.MMA) {
+        if (sport != Sport.TENNIS && sport != Sport.F1 && sport != Sport.MMA && sport != Sport.ESPORTS && sport != Sport.GOLF) {
             val hfa = when (sport) {
                 Sport.FOOTBALL -> 4.2
                 Sport.NBA -> 3.6

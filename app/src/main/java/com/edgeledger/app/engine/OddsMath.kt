@@ -100,6 +100,29 @@ object StatsMath {
     }
 
     /** Exact P(X > line) = 1 - P(X <= floor(line)) using iterative recurrence without factorial overflow. */
+    /**
+     * Overdispersed Negative Binomial tail probability P(X > line) where Var(X) = mean + alpha * mean^2.
+     * Falls back cleanly to Poisson when alpha <= 1e-6. Prevents overconfident probabilities on
+     * high-variance count markets like corners, cards, and fouls.
+     */
+    fun negBinOverProb(mean: Double, line: Double, dispersionAlpha: Double = 0.05): Double {
+        if (!mean.isFinite() || mean <= 0.0 || !line.isFinite()) return 0.0
+        if (!dispersionAlpha.isFinite() || dispersionAlpha <= 1e-6) return poissonOverProb(mean, line)
+        val kMax = kotlin.math.floor(line).toInt()
+        if (kMax < 0) return 1.0
+        val r = 1.0 / dispersionAlpha
+        val p = r / (r + mean)
+        val q = 1.0 - p
+        var pmf = kotlin.math.exp(r * kotlin.math.ln(p.coerceAtLeast(1e-12)))
+        var cdf = pmf
+        for (k in 1..kMax.coerceAtMost(200)) {
+            pmf *= ((k - 1.0 + r) / k.toDouble()) * q
+            cdf += pmf
+            if (cdf >= 1.0 - 1e-12) return 0.0
+        }
+        return (1.0 - cdf).coerceIn(0.0, 1.0)
+    }
+
     fun poissonOverProb(mean: Double, line: Double): Double {
         if (!mean.isFinite() || !line.isFinite()) return 0.5
         val safeL = max(0.01, mean)
@@ -121,6 +144,7 @@ object StatsMath {
     /** Exact Poisson quantile: smallest k >= 0 with P(X <= k) >= q. */
     fun poissonQuantile(mean: Double, q: Double): Int {
         if (!mean.isFinite() || mean <= 0.0) return 0
+        if (!q.isFinite()) return 0
         val target = q.coerceIn(0.001, 0.999)
         if (mean > 100.0) {
             return max(0, (mean + normalInvCdf(target) * sqrt(mean)).roundToInt())
@@ -170,6 +194,16 @@ data class ArbitrageResult(
     val profitPct: Double,
     val stakeA: Double,
     val stakeB: Double,
+    val guaranteedPayout: Double,
+    val guaranteedProfit: Double,
+)
+
+data class ThreeWayArbitrageResult(
+    val isArbitrage: Boolean,
+    val profitPct: Double,
+    val stakeHome: Double,
+    val stakeDraw: Double,
+    val stakeAway: Double,
     val guaranteedPayout: Double,
     val guaranteedProfit: Double,
 )
@@ -236,7 +270,7 @@ object OddsMath {
 
         val qHome = 1.0 / homeOdds
         val qAway = 1.0 / awayOdds
-        val qDraw = if (isThreeWay) 1.0 / drawOdds!! else 0.0
+        val qDraw = if (drawOdds != null) 1.0 / drawOdds else 0.0
         val rawProbs = if (isThreeWay) doubleArrayOf(qHome, qDraw, qAway) else doubleArrayOf(qHome, qAway)
 
         val overround = rawProbs.sum()
@@ -295,6 +329,7 @@ object OddsMath {
         kellyFraction: Double = 0.25,
         maxCap: Double = 0.05,
         flatUnitPct: Double = 0.02,
+        flatUnitAmount: Double = 20.0,
     ): Double {
         if (!bankroll.isFinite() || bankroll <= 0.0 ||
             !maxCap.isFinite() || maxCap <= 0.0 ||
@@ -304,6 +339,7 @@ object OddsMath {
             return 0.0
         }
         val safeCap = maxCap.coerceAtMost(1.0)
+        val safeFlatAmt = if (flatUnitAmount.isFinite() && flatUnitAmount > 0.0) flatUnitAmount else 20.0
         val stakeFraction = when (mode) {
             StakingMode.FRACTIONAL_KELLY -> fractionalKelly(
                 modelProb = modelProb,
@@ -313,7 +349,7 @@ object OddsMath {
             )
             StakingMode.FLAT -> {
                 if (expectedValue(modelProb, decimalOdds) <= 0.0) 0.0
-                else (20.0 / bankroll.coerceAtLeast(1.0)).coerceIn(0.0, safeCap)
+                else (safeFlatAmt / bankroll.coerceAtLeast(1.0)).coerceIn(0.0, safeCap)
             }
             StakingMode.PERCENT_BANKROLL -> {
                 if (!flatUnitPct.isFinite() || flatUnitPct <= 0.0 || expectedValue(modelProb, decimalOdds) <= 0.0) 0.0
@@ -393,8 +429,8 @@ object OddsMath {
 
         val results = mutableListOf<SideValueEval>()
         results += evalSide(homeLabel, effHomeProb, devig.fairHome, oddsHome, dnbEvScale)
-        if (hasDrawOdds) {
-            results += evalSide("Draw", safeD, devig.fairDraw, oddsDraw!!)
+        if (hasDrawOdds && oddsDraw != null) {
+            results += evalSide("Draw", safeD, devig.fairDraw, oddsDraw)
         }
         results += evalSide(awayLabel, effAwayProb, devig.fairAway, oddsAway, dnbEvScale)
         return results
@@ -531,6 +567,41 @@ object OddsMath {
             stakeB = stakeB,
             guaranteedPayout = guaranteedPayout,
             guaranteedProfit = guaranteedProfit,
+        )
+    }
+
+    /** Detects three-way arbitrage (1X2 Football/Rugby) and computes equalized-payout Dutching stakes. */
+    fun calculateThreeWayArbitrage(
+        oddsHome: Double,
+        oddsDraw: Double,
+        oddsAway: Double,
+        totalStake: Double,
+    ): ThreeWayArbitrageResult {
+        if (!oddsHome.isFinite() || !oddsDraw.isFinite() || !oddsAway.isFinite() || !totalStake.isFinite() ||
+            oddsHome <= 1.0 || oddsDraw <= 1.0 || oddsAway <= 1.0 || totalStake <= 0.0
+        ) {
+            return ThreeWayArbitrageResult(false, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        }
+        val invH = 1.0 / oddsHome
+        val invD = 1.0 / oddsDraw
+        val invA = 1.0 / oddsAway
+        val invSum = invH + invD + invA
+        val profitPct = ((1.0 / invSum) - 1.0) * 100.0
+        if (invSum >= 1.0 - EPSILON) {
+            return ThreeWayArbitrageResult(false, profitPct, 0.0, 0.0, 0.0, 0.0, 0.0)
+        }
+        val stakeH = totalStake * (invH / invSum)
+        val stakeD = totalStake * (invD / invSum)
+        val stakeA = totalStake * (invA / invSum)
+        val guaranteedPayout = totalStake / invSum
+        return ThreeWayArbitrageResult(
+            isArbitrage = true,
+            profitPct = profitPct,
+            stakeHome = stakeH,
+            stakeDraw = stakeD,
+            stakeAway = stakeA,
+            guaranteedPayout = guaranteedPayout,
+            guaranteedProfit = guaranteedPayout - totalStake,
         )
     }
 

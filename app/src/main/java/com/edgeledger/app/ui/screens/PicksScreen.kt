@@ -1,6 +1,8 @@
 package com.edgeledger.app.ui.screens
 
-import android.content.Intent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -45,7 +47,9 @@ import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatusBadge
 import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.scaledSp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -131,7 +135,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
     val winRate = if (settled > 0) ((won.toDouble() / settled) * 100.0).roundToInt() else 0
     val avgClv = if (clvCount > 0) clvSum / clvCount else null
 
-    fun exportCsv() {
+    fun buildCsvPayload(): String {
         val header = "Date,Mode,Sport,League,Matchup,Pick,Bookmaker,Odds,ClosingOdds,Stake,Status,SettledPnL\n"
         val body = bets.joinToString("\n") {
             listOf(
@@ -149,15 +153,10 @@ fun PicksScreen(app: EdgeLedgerApp) {
                 it.settledPnl?.let { pnl -> String.format(Locale.US, "%.2f", pnl) } ?: "",
             ).joinToString(",")
         }
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Picks Backup (CSV)")
-            putExtra(Intent.EXTRA_TEXT, header + body)
-        }
-        runCatching { context.startActivity(Intent.createChooser(shareIntent, "Export Picks CSV")) }
+        return header + body
     }
 
-    fun exportJson() {
+    fun buildJsonPayload(): String {
         val dtos = bets.map {
             ExportedBetDto(
                 id = it.id,
@@ -175,12 +174,57 @@ fun PicksScreen(app: EdgeLedgerApp) {
                 settledPnl = it.settledPnl,
             )
         }
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, "EdgeLedger Picks Backup (JSON)")
-            putExtra(Intent.EXTRA_TEXT, exportJsonCodec.encodeToString(dtos))
+        return exportJsonCodec.encodeToString(dtos)
+    }
+
+    val csvExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv"),
+    ) { uri ->
+        if (uri != null) {
+            val payload = buildCsvPayload()
+            val count = bets.size
+            app.appScope.launch(Dispatchers.IO) {
+                val res = runCatching {
+                    val stream = context.contentResolver.openOutputStream(uri)
+                        ?: error("Could not open output stream")
+                    stream.use { os -> os.write(payload.toByteArray(Charsets.UTF_8)) }
+                }
+                withContext(Dispatchers.Main) {
+                    val msg = if (res.isSuccess) "Saved CSV backup ($count picks)." else "Could not save CSV file."
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
         }
-        runCatching { context.startActivity(Intent.createChooser(shareIntent, "Export Picks JSON")) }
+    }
+
+    val jsonExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri != null) {
+            val payload = buildJsonPayload()
+            val count = bets.size
+            app.appScope.launch(Dispatchers.IO) {
+                val res = runCatching {
+                    val stream = context.contentResolver.openOutputStream(uri)
+                        ?: error("Could not open output stream")
+                    stream.use { os -> os.write(payload.toByteArray(Charsets.UTF_8)) }
+                }
+                withContext(Dispatchers.Main) {
+                    val msg = if (res.isSuccess) "Saved JSON backup ($count picks)." else "Could not save JSON file."
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    fun exportCsv() {
+        val stamp = Instant.now().toString().take(10)
+        csvExportLauncher.launch("edgeledger-picks-$stamp.csv")
+    }
+
+    fun exportJson() {
+        val stamp = Instant.now().toString().take(10)
+        jsonExportLauncher.launch("edgeledger-picks-$stamp.json")
     }
 
     LazyColumn(

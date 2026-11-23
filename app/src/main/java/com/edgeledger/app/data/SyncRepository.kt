@@ -3,6 +3,7 @@ package com.edgeledger.app.data
 import android.content.Context
 import androidx.glance.appwidget.updateAll
 import androidx.room.withTransaction
+import com.edgeledger.app.BuildConfig
 import com.edgeledger.app.engine.CsvAndFeedParsers
 import com.edgeledger.app.engine.OddsMath
 import com.edgeledger.app.engine.PlayerPropsEngine
@@ -95,7 +96,7 @@ class SyncRepository(
     private val prefsRepo: ThemeAndPrefsRepository,
 ) {
     private val appContext = context.applicationContext
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; coerceInputValues = true }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -104,7 +105,7 @@ class SyncRepository(
         .callTimeout(20, TimeUnit.SECONDS)
         .build()
 
-    private val optionalClient = OptionalOddsAndDataClient(client, db.dao())
+    private val optionalClient = OptionalOddsAndDataClient(client, db.dao(), appContext.cacheDir)
     val predictionHistory: Flow<List<PredictionHistoryEntity>> = db.dao().observePredictionHistory()
     val apiQuotas: Flow<List<ApiQuotaEntity>> = db.dao().observeApiQuotas()
     private val circuitStates = ConcurrentHashMap<String, CircuitState>()
@@ -243,7 +244,7 @@ class SyncRepository(
         private const val CIRCUIT_FAILURE_THRESHOLD = 3
         private const val CIRCUIT_COOLDOWN_MS = 15L * 60_000L
 
-        private val sharedJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        private val sharedJson = Json { ignoreUnknownKeys = true; encodeDefaults = true; coerceInputValues = true }
         private val snapshotFileMutex = Mutex()
         private val ODDS_TIME_FMT = DateTimeFormatter.ofPattern("MMM d HH:mm", Locale.US).withZone(ZoneOffset.UTC)
 
@@ -283,17 +284,61 @@ class SyncRepository(
 
         fun readableLeagueName(leagueId: String, sport: Sport): String {
             if (sport == Sport.F1) return "Formula 1"
-            if (sport == Sport.MMA) return "UFC / MMA"
+            if (sport == Sport.MMA) return if (leagueId.equals("PFL", ignoreCase = true)) "PFL MMA" else "UFC / MMA"
             if (sport == Sport.CRICKET) return "Cricket · ICC"
+            if (sport == Sport.AFL) return "AFL"
+            if (sport == Sport.RUGBY) return "Rugby Union"
+            if (sport == Sport.ESPORTS) return "Dota 2 Pro"
+            if (sport == Sport.GOLF) return "PGA Tour"
             return when (leagueId.uppercase(Locale.US)) {
                 "E0" -> "Premier League"
                 "E1" -> "Championship"
+                "E2" -> "League One"
+                "E3" -> "League Two"
+                "EC" -> "National League"
                 "SP1" -> "La Liga"
+                "SP2" -> "La Liga 2"
                 "D1" -> "Bundesliga"
+                "D2" -> "2. Bundesliga"
+                "D3" -> "3. Liga"
+                "DFB" -> "DFB-Pokal"
                 "I1" -> "Serie A"
+                "I2" -> "Serie B"
                 "F1" -> "Ligue 1"
+                "F2" -> "Ligue 2"
+                "N1" -> "Eredivisie"
+                "P1" -> "Primeira Liga"
+                "B1" -> "Belgian Pro League"
+                "SC0" -> "Scottish Premiership"
+                "SC1" -> "Scottish Championship"
+                "SC2" -> "Scottish League One"
+                "SC3" -> "Scottish League Two"
+                "T1" -> "Süper Lig"
+                "G1" -> "Greece Super League"
+                "ARG" -> "Liga Profesional"
+                "AUT" -> "Austrian Bundesliga"
+                "BRA" -> "Brasileirão"
+                "CHN" -> "Chinese Super League"
+                "DNK" -> "Danish Superliga"
+                "FIN" -> "Veikkausliiga"
+                "IRL" -> "League of Ireland"
+                "JPN" -> "J1 League"
+                "MEX" -> "Liga MX"
+                "NOR" -> "Eliteserien"
+                "POL" -> "Ekstraklasa"
+                "ROU" -> "Liga 1 Romania"
+                "RUS" -> "Russian Premier League"
+                "SWE" -> "Allsvenskan"
+                "SWZ" -> "Swiss Super League"
+                "USA", "MLS" -> "MLS"
+                "UCL" -> "Champions League"
+                "UEL" -> "Europa League"
+                "UECL" -> "Conference League"
                 "NFL" -> "NFL"
+                "NCAAF" -> "NCAA Football"
                 "NBA" -> "NBA"
+                "NCAAB" -> "NCAA Basketball"
+                "WNBA" -> "WNBA"
                 "NHL" -> "NHL"
                 "MLB" -> "MLB"
                 "ATP" -> "ATP Tour"
@@ -519,12 +564,95 @@ class SyncRepository(
         }
     }
 
+    suspend fun pruneExpiredCaches(retentionMs: Long = 7L * 24L * 3_600_000L) = withContext(Dispatchers.IO) {
+        val cutoff = System.currentTimeMillis() - retentionMs
+        suspendRunCatching { db.dao().pruneExpiredApiCache(cutoff) }
+        CacheSpillStore.pruneStaleSpillFiles(appContext.cacheDir, maxAgeMs = retentionMs)
+    }
+
+    private fun parseKickoffEpochMs(iso: String): Long? {
+        val trimmed = iso.trim()
+        if (trimmed.isBlank()) return null
+        return runCatching { java.time.OffsetDateTime.parse(trimmed).toInstant().toEpochMilli() }
+            .getOrElse {
+                runCatching { Instant.parse(trimmed).toEpochMilli() }
+                    .getOrElse {
+                        runCatching {
+                            if (trimmed.length >= 10) {
+                                LocalDate.parse(trimmed.substring(0, 10))
+                                    .atTime(23, 59)
+                                    .toInstant(ZoneOffset.UTC)
+                                    .toEpochMilli()
+                            } else null
+                        }.getOrNull()
+                    }
+            }
+    }
+
+    private fun mergeOddsLines(
+        target: MutableMap<String, List<BookmakerOddsLine>>,
+        incoming: Map<String, List<BookmakerOddsLine>>,
+    ) {
+        for ((k, lines) in incoming) {
+            if (lines.isEmpty()) continue
+            val existing = target[k].orEmpty()
+            val merged = (existing + lines)
+                .distinctBy { "${it.bookmaker.trim().lowercase(Locale.ROOT)}|${it.homeOdds}|${it.drawOdds}|${it.awayOdds}" }
+                .sortedByDescending { it.isSharp }
+            target[k] = merged
+        }
+    }
+
+    private suspend fun fetchTextCached(
+        cacheKey: String,
+        url: String,
+        fallbackUrl: String? = null,
+        ttlMs: Long = 6L * 3_600_000L,
+    ): String {
+        val nowMs = System.currentTimeMillis()
+        val cached = suspendRunCatching { db.dao().getApiCache(cacheKey) }.getOrNull()
+        val cachedBody = CacheSpillStore.decodePayload(appContext.cacheDir, cached?.payloadJson)
+        if (cached != null && nowMs < cached.expiresAtEpochMs && !cachedBody.isNullOrBlank()) {
+            return cachedBody
+        }
+        return try {
+            val fresh = fetchText(url, fallbackUrl)
+            if (fresh.isNotBlank() && fresh.length <= 5_000_000) {
+                val encoded = CacheSpillStore.encodePayload(appContext.cacheDir, cacheKey, fresh)
+                if (encoded != null) {
+                    suspendRunCatching {
+                        db.dao().putApiCache(
+                            ApiResponseCacheEntity(
+                                cacheKey = cacheKey,
+                                provider = "public_feed",
+                                payloadJson = encoded,
+                                fetchedAtEpochMs = nowMs,
+                                expiresAtEpochMs = nowMs + ttlMs,
+                                httpStatus = 200,
+                                etag = null,
+                            )
+                        )
+                    }
+                }
+            }
+            fresh
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            if (!cachedBody.isNullOrBlank()) cachedBody else throw e
+        }
+    }
+
     private suspend fun fetchWeatherForTeam(homeTeam: String): StadiumWeather? {
         val loc = SeedData.STADIUM_GPS[homeTeam] ?: return null
-        if (loc.isDome) return StadiumWeather(loc.stadium, 21, 0, 0, "Indoor Dome")
+        val altNote = if (loc.altitudeM >= 500) " · High Altitude (${loc.altitudeM}m)" else ""
+        if (loc.isDome) return StadiumWeather(loc.stadium, 21, 0, 0, "Indoor Dome$altNote")
         return try {
-            val raw = fetchText(
-                "https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,wind_speed_10m,precipitation_probability&timezone=UTC"
+            val weatherKey = "openmeteo_${loc.stadium.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "_")}"
+            val raw = fetchTextCached(
+                cacheKey = weatherKey,
+                url = "https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,wind_speed_10m,precipitation_probability&timezone=UTC",
+                ttlMs = 3L * 3_600_000L,
             )
             val root = json.parseToJsonElement(raw) as? JsonObject ?: return null
             val cur = root["current"] as? JsonObject ?: return null
@@ -532,9 +660,9 @@ class SyncRepository(
             val wind = (cur["wind_speed_10m"] as? JsonPrimitive)?.doubleOrNull?.roundToInt() ?: 0
             val rain = (cur["precipitation_probability"] as? JsonPrimitive)?.doubleOrNull?.roundToInt() ?: 0
             val summary = when {
-                wind >= 28 -> "Windy (May affect passing/kicking)"
-                rain >= 55 -> "Rain Likely (Slick conditions)"
-                else -> "Clear / Normal"
+                wind >= 28 -> "Windy (May affect passing/kicking)$altNote"
+                rain >= 55 -> "Rain Likely (Slick conditions)$altNote"
+                else -> "Clear / Normal$altNote"
             }
             StadiumWeather(loc.stadium, temp, wind, rain, summary)
         } catch (ce: CancellationException) {
@@ -581,6 +709,8 @@ class SyncRepository(
             val liveUpcoming = java.util.Collections.synchronizedList(mutableListOf<RawUpcomingEvent>())
             val liveStandingsProfiles = ConcurrentHashMap<String, TeamProfile>()
             val clubElo = ConcurrentHashMap<String, Double>()
+            val externalEloByProfileKey = ConcurrentHashMap<String, Double>()
+            val teamInjuries = ConcurrentHashMap<String, List<String>>()
             val health = java.util.Collections.synchronizedList(mutableListOf<ProviderHealth>())
             val okCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -590,6 +720,7 @@ class SyncRepository(
                 val sport: Sport,
                 val url: String,
                 val fallback: String? = null,
+                val cacheTtlMs: Long = 0L,
                 val action: (String) -> Int,
             )
 
@@ -634,7 +765,7 @@ class SyncRepository(
                     val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "T1"); liveHistory.addAll(list); list.size
                 },
                 // Live Elo replacement for retired api.clubelo.com (olbauday/FPL-Core-Insights updated twice daily)
-                FeedSpec("fpl-elo", "Live Club Elo Ratings (FPL-Core)", Sport.FOOTBALL, "https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data/2026-2027/teams.csv") { raw ->
+                FeedSpec("fpl-elo", "Live Club Elo Ratings (FPL-Core)", Sport.FOOTBALL, "https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data/$seasonStart-${seasonStart + 1}/teams.csv", "https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data/${seasonStart - 1}-$seasonStart/teams.csv") { raw ->
                     val map = CsvAndFeedParsers.parseFplCoreEloCsv(raw); clubElo.putAll(map); map.size
                 },
                 // OpenLigaDB (Keyless 2026/27 German Bundesliga matchday feed)
@@ -774,11 +905,211 @@ class SyncRepository(
                     val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.F1, "F1", "Formula 1")
                     liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
                 },
+                // === v8.7.0 EXPANSION: 10 Untapped Football-Data.co.uk European Divisions (cached 12h) ===
+                FeedSpec("fd-e3", "Football-Data.co.uk (League Two)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/E3.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/E3.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "E3"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-ec", "Football-Data.co.uk (National League)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/EC.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/EC.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "EC"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-d2", "Football-Data.co.uk (2. Bundesliga)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/D2.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/D2.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "D2"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-i2", "Football-Data.co.uk (Serie B)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/I2.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/I2.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "I2"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-sp2", "Football-Data.co.uk (La Liga 2)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/SP2.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/SP2.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SP2"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-f2", "Football-Data.co.uk (Ligue 2)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/F2.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/F2.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "F2"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-g1", "Football-Data.co.uk (Greece Super)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/G1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/G1.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "G1"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-sc1", "Football-Data.co.uk (Scottish Champ)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/SC1.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/SC1.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SC1"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-sc2", "Football-Data.co.uk (Scottish L1)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/SC2.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/SC2.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SC2"); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-sc3", "Football-Data.co.uk (Scottish L2)", Sport.FOOTBALL, "https://www.football-data.co.uk/mmz4281/$seasonCode/SC3.csv", "https://www.football-data.co.uk/mmz4281/$prevSeasonCode/SC3.csv", 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SC3"); liveHistory.addAll(list); list.size
+                },
+                // === v8.7.0 EXPANSION: 16 Global Football-Data.co.uk "Extra" Leagues (summer calendar + global odds) ===
+                FeedSpec("fd-bra", "Football-Data Extra (Brasileirão)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/BRA.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "BRA", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-arg", "Football-Data Extra (Argentina)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/ARG.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "ARG", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-usa", "Football-Data Extra (MLS)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/USA.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "MLS", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-mex", "Football-Data Extra (Liga MX)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/MEX.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "MEX", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-jpn", "Football-Data Extra (J1 League)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/JPN.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "JPN", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-aut", "Football-Data Extra (Austria)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/AUT.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "AUT", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-dnk", "Football-Data Extra (Denmark)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/DNK.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "DNK", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-swe", "Football-Data Extra (Sweden)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/SWE.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SWE", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-nor", "Football-Data Extra (Norway)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/NOR.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "NOR", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-swz", "Football-Data Extra (Switzerland)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/SWZ.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "SWZ", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-pol", "Football-Data Extra (Poland)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/POL.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "POL", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-fin", "Football-Data Extra (Finland)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/FIN.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "FIN", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-irl", "Football-Data Extra (Ireland)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/IRL.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "IRL", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-rou", "Football-Data Extra (Romania)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/ROU.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "ROU", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-chn", "Football-Data Extra (China)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/CHN.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "CHN", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("fd-rus", "Football-Data Extra (Russia)", Sport.FOOTBALL, "https://www.football-data.co.uk/new/RUS.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseFootballDataCsv(raw, "RUS", minYear = today.year - 2); liveHistory.addAll(list); list.size
+                },
+                // === v8.7.0 EXPANSION: OpenLigaDB Extra Leagues, World Football Elo, FPL Live Injuries & Extra ESPN Soccer ===
+                FeedSpec("openligadb-bl2", "OpenLigaDB 2. Bundesliga", Sport.FOOTBALL, "https://api.openligadb.de/getmatchdata/bl2") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseOpenLigaDbMatches(raw, "D2", "2. Bundesliga")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("openligadb-bl3", "OpenLigaDB 3. Liga", Sport.FOOTBALL, "https://api.openligadb.de/getmatchdata/bl3") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseOpenLigaDbMatches(raw, "D3", "3. Liga")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("openligadb-dfb", "OpenLigaDB DFB-Pokal", Sport.FOOTBALL, "https://api.openligadb.de/getmatchdata/dfb") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseOpenLigaDbMatches(raw, "DFB", "DFB-Pokal")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("world-elo", "World Football Elo (eloratings.net)", Sport.FOOTBALL, "https://www.eloratings.net/World.tsv", null, 24L * 3_600_000L) { raw ->
+                    val map = CsvAndFeedParsers.parseWorldFootballEloTsv(raw); clubElo.putAll(map); map.size
+                },
+                FeedSpec("fpl-injuries", "FPL Bootstrap Live Injuries", Sport.FOOTBALL, "https://fantasy.premierleague.com/api/bootstrap-static/", null, 2L * 3_600_000L) { raw ->
+                    val map = CsvAndFeedParsers.parseFplBootstrapInjuries(raw); teamInjuries.putAll(map); map.size
+                },
+                FeedSpec("espn-sco", "ESPN Scottish Premiership", Sport.FOOTBALL, "https://site.api.espn.com/apis/site/v2/sports/soccer/sco.1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "SC0", "Scottish Premiership")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-por", "ESPN Primeira Liga", Sport.FOOTBALL, "https://site.api.espn.com/apis/site/v2/sports/soccer/por.1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "P1", "Primeira Liga")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-tur", "ESPN Süper Lig", Sport.FOOTBALL, "https://site.api.espn.com/apis/site/v2/sports/soccer/tur.1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "T1", "Süper Lig")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-bel", "ESPN Belgian Pro League", Sport.FOOTBALL, "https://site.api.espn.com/apis/site/v2/sports/soccer/bel.1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "B1", "Belgian Pro League")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-arg", "ESPN Liga Profesional", Sport.FOOTBALL, "https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "ARG", "Liga Profesional")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-uecl", "ESPN Conference League", Sport.FOOTBALL, "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa.conf/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.FOOTBALL, "UECL", "Conference League")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                // === v8.7.0 EXPANSION: US Sports & NCAA (nflverse Injuries, MoneyPuck xG, MLB History, NCAAF/NCAAB/WNBA) ===
+                FeedSpec("nflverse-injuries", "nflverse Weekly Injuries CSV", Sport.NFL, "https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_${today.year}.csv", "https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_${today.year - 1}.csv", 6L * 3_600_000L) { raw ->
+                    val map = CsvAndFeedParsers.parseNflverseInjuriesCsv(raw, today.year - 1); teamInjuries.putAll(map); map.size
+                },
+                FeedSpec("espn-ncaaf", "ESPN NCAA Football", Sport.NFL, "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NFL, "NCAAF", "NCAA Football")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("ncaa-api-fbs", "NCAA API (henrygd FBS)", Sport.NFL, "https://ncaa-api.henrygd.me/scoreboard/football/fbs") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseNcaaApiScoreboard(raw, Sport.NFL, "NCAAF", "NCAA Football")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-ncaab", "ESPN NCAA Basketball", Sport.NBA, "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=200") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NBA, "NCAAB", "NCAA Basketball")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("ncaa-api-mbb", "NCAA API (henrygd MBB)", Sport.NBA, "https://ncaa-api.henrygd.me/scoreboard/basketball-men/d1") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseNcaaApiScoreboard(raw, Sport.NBA, "NCAAB", "NCAA Basketball")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-wnba", "ESPN WNBA Scoreboard", Sport.NBA, "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.NBA, "WNBA", "WNBA")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("moneypuck-nhl", "MoneyPuck NHL Team xG CSV", Sport.NHL, "https://moneypuck.com/moneypuck/playerData/seasonSummary/$seasonStart/regular/teams.csv", "https://moneypuck.com/moneypuck/playerData/seasonSummary/${seasonStart - 1}/regular/teams.csv", 12L * 3_600_000L) { raw ->
+                    val map = CsvAndFeedParsers.parseMoneyPuckTeamsCsv(raw); liveStandingsProfiles.putAll(map); map.size
+                },
+                FeedSpec("mlb-recent-history", "Official MLB Completed Games", Sport.MLB, "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${today.minusDays(7)}&endDate=$today", null, 6L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseMlbCompletedGames(raw); liveHistory.addAll(list); list.size
+                },
+                // === v8.7.0 EXPANSION: Tennis Abstract Elo, TML Ongoing, Greco1899 UFC, Squiggle AFL, OpenDota, Rugby & Golf ===
+                FeedSpec("tml-ongoing", "TennisMyLife Ongoing Tourneys", Sport.TENNIS, "https://raw.githubusercontent.com/Tennismylife/TML-Database/master/ongoing_tourneys.csv", null, 6L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseTmlTennisCsv(raw); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("ta-atp-elo", "Tennis Abstract ATP Elo", Sport.TENNIS, "https://tennisabstract.com/reports/atp_elo_ratings.html", null, 24L * 3_600_000L) { raw ->
+                    val map = CsvAndFeedParsers.parseTennisAbstractEloHtml(raw)
+                    map.forEach { (player, elo) -> externalEloByProfileKey[PredictionEngine.profileKey(Sport.TENNIS, player)] = elo }
+                    map.size
+                },
+                FeedSpec("ta-wta-elo", "Tennis Abstract WTA Elo", Sport.TENNIS, "https://tennisabstract.com/reports/wta_elo_ratings.html", null, 24L * 3_600_000L) { raw ->
+                    val map = CsvAndFeedParsers.parseTennisAbstractEloHtml(raw)
+                    map.forEach { (player, elo) -> externalEloByProfileKey[PredictionEngine.profileKey(Sport.TENNIS, player)] = elo }
+                    map.size
+                },
+                FeedSpec("greco-ufc", "Greco1899 Daily UFC Stats CSV", Sport.MMA, "https://raw.githubusercontent.com/Greco1899/scrape_ufc_stats/main/ufc_fight_results.csv", null, 12L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseGrecoUfcResultsCsv(raw); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("squiggle-afl", "Squiggle AFL API", Sport.AFL, "https://api.squiggle.com.au/?q=games;year=${today.year}", "https://api.squiggle.com.au/?q=games;year=${today.year - 1}", 6L * 3_600_000L) { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseSquiggleAflGames(raw)
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("opendota-teams", "OpenDota Pro Team Elo", Sport.ESPORTS, "https://api.opendota.com/api/teams", null, 12L * 3_600_000L) { raw ->
+                    val map = CsvAndFeedParsers.parseOpenDotaTeams(raw); liveStandingsProfiles.putAll(map); map.size
+                },
+                FeedSpec("opendota-matches", "OpenDota Pro Matches", Sport.ESPORTS, "https://api.opendota.com/api/proMatches", null, 6L * 3_600_000L) { raw ->
+                    val list = CsvAndFeedParsers.parseOpenDotaProMatches(raw); liveHistory.addAll(list); list.size
+                },
+                FeedSpec("espn-rugby-6n", "ESPN Six Nations Rugby", Sport.RUGBY, "https://site.api.espn.com/apis/site/v2/sports/rugby/180659/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.RUGBY, "RUGBY_6N", "Six Nations Rugby")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-rugby-prem", "ESPN Premiership Rugby", Sport.RUGBY, "https://site.api.espn.com/apis/site/v2/sports/rugby/267979/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.RUGBY, "RUGBY_PREM", "Premiership Rugby")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-rugby-urc", "ESPN United Rugby Championship", Sport.RUGBY, "https://site.api.espn.com/apis/site/v2/sports/rugby/270557/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.RUGBY, "RUGBY_URC", "United Rugby Championship")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-rugby-top14", "ESPN Top 14 Rugby", Sport.RUGBY, "https://site.api.espn.com/apis/site/v2/sports/rugby/270559/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.RUGBY, "RUGBY_TOP14", "Top 14 Rugby")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
+                FeedSpec("espn-pga", "ESPN PGA Golf", Sport.GOLF, "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard") { raw ->
+                    val (h, u) = CsvAndFeedParsers.parseEspnScoreboard(raw, Sport.GOLF, "PGA", "PGA Tour")
+                    liveHistory.addAll(h); liveUpcoming.addAll(u); h.size + u.size
+                },
 
             )
 
             _syncStatusText.value = "Syncing live public datasets..."
-            val sem = Semaphore(6)
+            val sem = Semaphore(8)
             coroutineScope {
                 feeds.map { feed ->
                     async {
@@ -789,7 +1120,11 @@ class SyncRepository(
                                 return@withPermit
                             }
                             try {
-                                val raw = fetchText(feed.url, feed.fallback)
+                                val raw = if (feed.cacheTtlMs > 0L) {
+                                    fetchTextCached("feed:${feed.id}", feed.url, feed.fallback, feed.cacheTtlMs)
+                                } else {
+                                    fetchText(feed.url, feed.fallback)
+                                }
                                 val count = feed.action(raw)
                                 circuitStates.remove(feed.id)
                                 okCounter.incrementAndGet()
@@ -823,7 +1158,7 @@ class SyncRepository(
                 var matchedEvents = 0
                 for (spKey in oddsSports) {
                     val map = optionalClient.fetchTheOddsApi(spKey, keys.theOddsApiKey)
-                    liveOddsByMatch.putAll(map)
+                    mergeOddsLines(liveOddsByMatch, map)
                     matchedEvents += map.size
                 }
                 if (matchedEvents > 0) okCounter.incrementAndGet()
@@ -999,6 +1334,57 @@ class SyncRepository(
                 health.add(ProviderHealth("live-tennis-api", "Live Tennis API", Sport.TENNIS, if (ltMatches.isNotEmpty()) "LIVE" else "IDLE", ltMatches.size, now.toString(), "${ltMatches.size} matches"))
             }
 
+            if (keys.enableSxBet) {
+                val sx = optionalClient.fetchSxBetMarkets()
+                if (sx.isNotEmpty()) {
+                    okCounter.incrementAndGet()
+                    sx.take(20).forEach { (q, prob) ->
+                        val yp = (prob * 100.0).roundToInt().coerceIn(1, 99)
+                        livePredictionMarkets.add(PredictionMarketQuote("SX Bet", q, yp, 100 - yp))
+                    }
+                }
+                health.add(ProviderHealth("sx-bet", "SX Bet V3 Exchange", Sport.FOOTBALL, if (sx.isNotEmpty()) "LIVE" else "IDLE", sx.size, now.toString(), if (sx.isNotEmpty()) "${sx.size} exchange markets" else "No active markets"))
+            }
+
+            if (keys.enablePredictionBubbles) {
+                val pb = optionalClient.fetchPredictionBubblesMarkets()
+                if (pb.isNotEmpty()) {
+                    okCounter.incrementAndGet()
+                    pb.take(15).forEach { (q, prob) ->
+                        val yp = (prob * 100.0).roundToInt().coerceIn(1, 99)
+                        livePredictionMarkets.add(PredictionMarketQuote("PredBubbles", q, yp, 100 - yp))
+                    }
+                }
+                health.add(ProviderHealth("predictionbubbles", "PredictionBubbles", Sport.FOOTBALL, if (pb.isNotEmpty()) "LIVE" else "IDLE", pb.size, now.toString(), if (pb.isNotEmpty()) "${pb.size} cross-venue markets" else "Unavailable"))
+            }
+
+            if (keys.sportsGameOddsKey.isNotBlank()) {
+                val sgoMap = optionalClient.fetchSportsGameOdds(keys.sportsGameOddsKey)
+                if (sgoMap.isNotEmpty()) {
+                    mergeOddsLines(liveOddsByMatch, sgoMap)
+                    okCounter.incrementAndGet()
+                }
+                health.add(ProviderHealth("sportsgameodds", "SportsGameOdds", Sport.FOOTBALL, if (sgoMap.isNotEmpty()) "LIVE" else "IDLE", sgoMap.size, now.toString(), "${sgoMap.size} fair-odds matchups"))
+            }
+
+            if (keys.parlayApiKey.isNotBlank()) {
+                val parlayMap = optionalClient.fetchParlayApiOdds(keys.parlayApiKey)
+                if (parlayMap.isNotEmpty()) {
+                    mergeOddsLines(liveOddsByMatch, parlayMap)
+                    okCounter.incrementAndGet()
+                }
+                health.add(ProviderHealth("parlay-api", "ParlayAPI", Sport.FOOTBALL, if (parlayMap.isNotEmpty()) "LIVE" else "IDLE", parlayMap.size, now.toString(), "${parlayMap.size} consensus matchups"))
+            }
+
+            if (keys.cfbdApiKey.isNotBlank()) {
+                val cfbdMap = optionalClient.fetchCfbdLines(keys.cfbdApiKey, today.year)
+                if (cfbdMap.isNotEmpty()) {
+                    mergeOddsLines(liveOddsByMatch, cfbdMap)
+                    okCounter.incrementAndGet()
+                }
+                health.add(ProviderHealth("cfbd", "CFBD / CBBD", Sport.NFL, if (cfbdMap.isNotEmpty()) "LIVE" else "IDLE", cfbdMap.size, now.toString(), "${cfbdMap.size} college lines"))
+            }
+
             _providerQuotas.value = optionalClient.getQuotaSummary(keys)
 
             val okCount = okCounter.get()
@@ -1048,7 +1434,7 @@ class SyncRepository(
             val weatherMap = ConcurrentHashMap<String, StadiumWeather>()
             coroutineScope {
                 upcomingWithOdds
-                    .filter { it.sport == Sport.FOOTBALL || it.sport == Sport.NFL }
+                    .filter { it.sport == Sport.FOOTBALL || it.sport == Sport.NFL || it.sport == Sport.MLB }
                     .map { it.homeTeam }
                     .distinct()
                     .map { homeTeam ->
@@ -1107,14 +1493,14 @@ class SyncRepository(
             val dedupedHistory = liveHistory.toList()
                 .groupBy { "${it.sport.name}|${it.dateIso}|${it.homeTeam.lowercase(Locale.ROOT)}|${it.awayTeam.lowercase(Locale.ROOT)}" }
                 .values
-                .map { dupes -> dupes.maxByOrNull { (if (it.oddsHome != null) 4 else 0) + (if (it.homeShots != null) 2 else 0) + (if (!it.id.startsWith("espn_")) 1 else 0) }!! }
+                .mapNotNull { dupes -> dupes.maxByOrNull { (if (it.oddsHome != null) 4 else 0) + (if (it.homeShots != null) 2 else 0) + (if (!it.id.startsWith("espn_")) 1 else 0) } }
 
             _syncStatusText.value = "Grading completed predictions against final scores..."
             autoGradePendingPredictions(dedupedHistory, nowMs)
 
             _syncStatusText.value = "Running on-device prediction models..."
             val prevSnap = _snapshot.value
-            val auxiliaryFeedIds = setOf("polymarket", "kalshi", "manifold", "the-odds-api", "oddspapi", "api-sports", "fpl-elo", "jolpica-f1")
+            val auxiliaryFeedIds = setOf("polymarket", "kalshi", "manifold", "sx-bet", "predictionbubbles", "the-odds-api", "oddspapi", "api-sports", "sportsgameodds", "parlay-api", "cfbd", "fpl-elo", "world-elo", "fpl-injuries", "nflverse-injuries", "ta-atp-elo", "ta-wta-elo", "jolpica-f1")
             val succeededSports = health
                 .filter { (it.status == "LIVE" || it.status == "OFF-SEASON") && it.id !in auxiliaryFeedIds && !it.id.endsWith("-standings") }
                 .map { it.sport }
@@ -1124,6 +1510,8 @@ class SyncRepository(
                     history = dedupedHistory,
                     upcoming = upcomingWithOdds,
                     clubElo = clubElo.toMap(),
+                    externalEloByProfileKey = externalEloByProfileKey.toMap(),
+                    teamInjuries = teamInjuries.toMap(),
                     health = health.toList(),
                     now = now,
                     predictionMarkets = livePredictionMarkets,
@@ -1194,12 +1582,12 @@ class SyncRepository(
                         .toHttpUrl().newBuilder().addPathSegment(teamId).addPathSegment("roster").build().toString()
                     val fallbackUrl = "https://site.api.espn.com/apis/site/v2/sports/$espnPath/teams/"
                         .toHttpUrl().newBuilder().addPathSegment(teamId).addPathSegment("roster").build().toString()
-                    CsvAndFeedParsers.parseEspnRoster(fetchText(primaryUrl, fallbackUrl))
+                    CsvAndFeedParsers.parseEspnRoster(fetchTextCached("roster_espn_${sport.name}_$teamId", primaryUrl, fallbackUrl, ttlMs = 24L * 3_600_000L))
                 }
                 sport == Sport.NHL -> {
                     val url = "https://api-web.nhle.com/v1/roster/"
                         .toHttpUrl().newBuilder().addPathSegment(teamId).addPathSegment("current").build().toString()
-                    CsvAndFeedParsers.parseNhlRoster(fetchText(url))
+                    CsvAndFeedParsers.parseNhlRoster(fetchTextCached("roster_nhl_$abbr", url, ttlMs = 24L * 3_600_000L))
                 }
                 else -> emptyList()
             }
@@ -1244,6 +1632,8 @@ class SyncRepository(
         history: List<HistoricalMatch>,
         upcoming: List<RawUpcomingEvent>,
         clubElo: Map<String, Double>,
+        externalEloByProfileKey: Map<String, Double> = emptyMap(),
+        teamInjuries: Map<String, List<String>> = emptyMap(),
         health: List<ProviderHealth>,
         now: Instant,
         predictionMarkets: List<PredictionMarketQuote>,
@@ -1253,7 +1643,7 @@ class SyncRepository(
         oddsHistoryByFixture: Map<String, List<OddsHistoryEntity>>,
     ): AppModelSnapshot {
         val userPrefs = prefsRepo.prefs.value
-        val historicalProfiles = PredictionEngine.buildTeamProfiles(history, clubElo)
+        val historicalProfiles = PredictionEngine.buildTeamProfiles(history, clubElo, externalEloByProfileKey)
         val mergedProfiles = historicalProfiles.toMutableMap()
 
         for ((k, sp) in standingsProfiles) {
@@ -1292,9 +1682,21 @@ class SyncRepository(
             }
             .sortedByDescending { it.accuracyScore }
 
+        // Pre-index historical H2H pairs once -> O(H + U) instead of O(U * H)
+        val h2hByPair = history.groupBy {
+            Triple(
+                it.sport,
+                minOf(it.homeTeam.trim().lowercase(Locale.ROOT), it.awayTeam.trim().lowercase(Locale.ROOT)),
+                maxOf(it.homeTeam.trim().lowercase(Locale.ROOT), it.awayTeam.trim().lowercase(Locale.ROOT)),
+            )
+        }.mapValues { (_, list) -> list.sortedByDescending { it.dateIso } }
+
         val fixtures = upcoming.map { ev ->
             val pH = profiles[PredictionEngine.profileKey(ev.sport, ev.homeTeam)]
             val pA = profiles[PredictionEngine.profileKey(ev.sport, ev.awayTeam)]
+            val weather = weatherByHomeTeam[ev.homeTeam]
+            val homeInjList = teamInjuries[ev.homeTeam].orEmpty()
+            val awayInjList = teamInjuries[ev.awayTeam].orEmpty()
             val sharpLine = ev.bookOdds.firstOrNull { it.isSharp } ?: ev.bookOdds.firstOrNull()
             val sharpDevig = sharpLine?.let {
                 OddsMath.deVig(it.homeOdds, it.awayOdds, it.drawOdds, userPrefs.devigMethod)
@@ -1310,36 +1712,48 @@ class SyncRepository(
                 surface = ev.surface,
                 sharpMarketHomeProb = sharpFairHome,
                 marketBlendWeight = userPrefs.marketBlendWeight,
+                weather = weather,
+                homeInjuryCount = homeInjList.size,
+                awayInjuryCount = awayInjList.size,
             )
 
-            val h2h = history.filter {
-                it.sport == ev.sport &&
-                    ((it.homeTeam == ev.homeTeam && it.awayTeam == ev.awayTeam) ||
-                        (it.homeTeam == ev.awayTeam && it.awayTeam == ev.homeTeam))
-            }.sortedByDescending { it.dateIso }.take(5).map {
+            val h2hKey = Triple(
+                ev.sport,
+                minOf(ev.homeTeam.trim().lowercase(Locale.ROOT), ev.awayTeam.trim().lowercase(Locale.ROOT)),
+                maxOf(ev.homeTeam.trim().lowercase(Locale.ROOT), ev.awayTeam.trim().lowercase(Locale.ROOT)),
+            )
+            val h2h = h2hByPair[h2hKey].orEmpty().take(5).map {
                 HeadToHeadGame(it.dateIso, it.homeTeam, it.awayTeam, it.homeScore, it.awayScore)
             }
 
-            val insights = PredictionEngine.generatePlainInsights(pH, pA, h2h, ev.sport, markets)
-            val weather = weatherByHomeTeam[ev.homeTeam]
+            val baseInsights = PredictionEngine.generatePlainInsights(pH, pA, h2h, ev.sport, markets)
+            val injuryNotes = buildList {
+                if (homeInjList.isNotEmpty()) add("${ev.homeTeam} availability watch: ${homeInjList.joinToString(", ")}.")
+                if (awayInjList.isNotEmpty()) add("${ev.awayTeam} availability watch: ${awayInjList.joinToString(", ")}.")
+            }
+            val insights = (baseInsights + injuryNotes).distinct()
 
-            val bestEval = sharpLine?.let { line ->
+            // Line-shop across ALL available sportsbooks to surface the true highest +EV price
+            val bestHomeOdds = ev.bookOdds.mapNotNull { it.homeOdds.takeIf { o -> o.isFinite() && o > 1.0 } }.maxOrNull()
+            val bestDrawOdds = ev.bookOdds.mapNotNull { it.drawOdds?.takeIf { o -> o.isFinite() && o > 1.0 } }.maxOrNull()
+            val bestAwayOdds = ev.bookOdds.mapNotNull { it.awayOdds.takeIf { o -> o.isFinite() && o > 1.0 } }.maxOrNull()
+            val bestEval = if (bestHomeOdds != null && bestAwayOdds != null) {
                 OddsMath.evaluateSides(
                     homeLabel = ev.homeTeam,
                     awayLabel = ev.awayTeam,
                     probHome = markets.probHome,
                     probDraw = markets.probDraw,
                     probAway = markets.probAway,
-                    oddsHome = line.homeOdds,
-                    oddsDraw = line.drawOdds,
-                    oddsAway = line.awayOdds,
+                    oddsHome = bestHomeOdds,
+                    oddsDraw = bestDrawOdds,
+                    oddsAway = bestAwayOdds,
                     kellyFraction = userPrefs.riskStyle.kellyFraction,
                     maxStakePct = userPrefs.riskStyle.maxStakePct,
                     minEvThreshold = userPrefs.minEvPct / 100.0,
                     minProbFloor = userPrefs.minProbFloorPct / 100.0,
                     devigMethod = userPrefs.devigMethod,
                 ).filter { it.isGoodValue }.maxByOrNull { it.expectedValue }
-            }
+            } else null
 
             val hPower = pH?.powerScore ?: 50
             val aPower = pA?.powerScore ?: 50

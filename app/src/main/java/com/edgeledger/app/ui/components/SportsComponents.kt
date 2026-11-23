@@ -54,7 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.SubcomposeAsyncImage
+import coil.compose.AsyncImage
 import coil.imageLoader
 import coil.request.ImageRequest
 import com.edgeledger.app.engine.FeatureDriver
@@ -91,9 +91,7 @@ fun formatStatValue(value: Double, decimals: Int = 1, suffix: String = ""): Stri
     return String.format(Locale.US, "%.${safeDec}f", value) + suffix
 }
 
-fun shortTeamName(fullName: String): String {
-    val clean = fullName.trim()
-    val known = mapOf(
+private val SHORT_TEAM_NAMES: Map<String, String> = mapOf(
         "crystal palace" to "C. Palace",
         "aston villa" to "A. Villa",
         "manchester city" to "Man City",
@@ -210,8 +208,11 @@ fun shortTeamName(fullName: String): String {
         "vegas golden knights" to "Golden Knights",
         "washington capitals" to "Capitals",
         "winnipeg jets" to "Jets",
-    )
-    known[clean.lowercase(Locale.ROOT)]?.let { return it }
+)
+
+fun shortTeamName(fullName: String): String {
+    val clean = fullName.trim()
+    SHORT_TEAM_NAMES[clean.lowercase(Locale.ROOT)]?.let { return it }
     if (clean.length <= 13) return clean
     val words = clean.split(WHITESPACE_SPLIT_REGEX).filter { it.isNotEmpty() }
     val abbr = if (words.size >= 2 && words[0].length >= 4) {
@@ -477,20 +478,24 @@ fun TeamAvatar(
                 .border(1.dp, emblemBorder, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
+            var showFallback by remember(logoUrl) { mutableStateOf(true) }
             val imgRequest = remember(context, logoUrl) {
                 ImageRequest.Builder(context)
                     .data(logoUrl)
                     .crossfade(true)
                     .build()
             }
-            SubcomposeAsyncImage(
+            if (showFallback) {
+                InitialsFallback()
+            }
+            AsyncImage(
                 model = imgRequest,
                 imageLoader = context.imageLoader,
                 contentDescription = "$teamName logo",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.size(size * 0.76f),
-                loading = { InitialsFallback() },
-                error = { InitialsFallback() },
+                onSuccess = { showFallback = false },
+                onError = { showFallback = true },
             )
         }
     }
@@ -614,10 +619,12 @@ fun StatCompareBar(
     higherIsBetter: Boolean = true,
 ) {
     val c = AppTheme.tokens.colors
-    val total = max(0.001, abs(homeValue) + abs(awayValue))
-    val hWeight = (abs(homeValue) / total).toFloat().coerceIn(0.05f, 0.95f)
+    val safeH = if (homeValue.isFinite()) homeValue else 0.0
+    val safeA = if (awayValue.isFinite()) awayValue else 0.0
+    val total = max(0.001, abs(safeH) + abs(safeA))
+    val hWeight = (abs(safeH) / total).toFloat().coerceIn(0.05f, 0.95f)
     val aWeight = (1f - hWeight).coerceAtLeast(0.05f)
-    val hLeads = if (higherIsBetter) homeValue >= awayValue else homeValue <= awayValue
+    val hLeads = if (higherIsBetter) safeH >= safeA else safeH <= safeA
 
     val homeFormatted = formatStatValue(homeValue, decimals, suffix)
     val awayFormatted = formatStatValue(awayValue, decimals, suffix)
