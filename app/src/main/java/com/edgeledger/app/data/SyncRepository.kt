@@ -202,7 +202,7 @@ class SyncRepository(
             val total = actualHomeScore + actualAwayScore
             val bothScored = actualHomeScore > 0 && actualAwayScore > 0
 
-            val isUnsupportedSubMarket = "corner" in label || "card" in label || "1st set" in label || "1st half" in label || Regex("[+-]\d+\.5").containsMatchIn(label)
+            val isUnsupportedSubMarket = "corner" in label || "card" in label || "1st set" in label || "1st half" in label || Regex("[+-]\\d+\\.5").containsMatchIn(label)
             val status = when {
                 isUnsupportedSubMarket -> "PUSH"
                 "both teams to score" in label && "no" !in label -> if (bothScored) "WON" else "LOST"
@@ -550,7 +550,7 @@ class SyncRepository(
                         wKph >= 28 -> "Windy (${wKph.roundToInt()} km/h) · ${tC.roundToInt()}°C"
                         else -> "Clear · ${tC.roundToInt()}°C"
                     }
-                    StadiumWeather(loc.stadium, tC, wKph, rPct, summary)
+                    StadiumWeather(loc.stadium, tC.roundToInt(), wKph.roundToInt(), rPct, summary)
                 } else null
             } else null
         }
