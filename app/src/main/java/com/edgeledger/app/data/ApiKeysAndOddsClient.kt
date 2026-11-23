@@ -5,6 +5,10 @@ import com.edgeledger.app.engine.RawUpcomingEvent
 import com.edgeledger.app.model.BookmakerOddsLine
 import com.edgeledger.app.model.Sport
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -32,15 +36,22 @@ data class UserApiKeys(
     val oddsPapiKey: String = "",
     val cricketDataKey: String = "",
     val apiSportsKey: String = "",
+    val balldontlieKey: String = "",
+    val liveTennisApiKey: String = "",
+    val openWeatherApiKey: String = "",
     val enablePolymarket: Boolean = true,
     val enableKalshi: Boolean = true,
+    val enableManifold: Boolean = true,
 ) {
     fun hasAnyApiKey(): Boolean =
         theOddsApiKey.isNotBlank() ||
             footballDataOrgKey.isNotBlank() ||
             oddsPapiKey.isNotBlank() ||
             cricketDataKey.isNotBlank() ||
-            apiSportsKey.isNotBlank()
+            apiSportsKey.isNotBlank() ||
+            balldontlieKey.isNotBlank() ||
+            liveTennisApiKey.isNotBlank() ||
+            openWeatherApiKey.isNotBlank()
 
     override fun toString(): String =
         "UserApiKeys(" +
@@ -49,8 +60,12 @@ data class UserApiKeys(
             "oddsPapiKey=${maskSecret(oddsPapiKey)}, " +
             "cricketDataKey=${maskSecret(cricketDataKey)}, " +
             "apiSportsKey=${maskSecret(apiSportsKey)}, " +
+            "balldontlieKey=${maskSecret(balldontlieKey)}, " +
+            "liveTennisApiKey=${maskSecret(liveTennisApiKey)}, " +
+            "openWeatherApiKey=${maskSecret(openWeatherApiKey)}, " +
             "enablePolymarket=$enablePolymarket, " +
-            "enableKalshi=$enableKalshi)"
+            "enableKalshi=$enableKalshi, " +
+            "enableManifold=$enableManifold)"
 
     private fun maskSecret(secret: String): String =
         if (secret.isBlank()) "<empty>" else "<configured:${secret.length}ch>"
@@ -80,6 +95,7 @@ class OptionalOddsAndDataClient(
         .followSslRedirects(false)
         .build()
 
+    private val quotaMutex = Mutex()
     private val callsByProvider = ConcurrentHashMap<String, AtomicInteger>()
     private val statusByProvider = ConcurrentHashMap<String, String>()
 
@@ -121,16 +137,16 @@ class OptionalOddsAndDataClient(
         windowKey: String,
         hardLimit: Int,
         useAuthClient: Boolean = true,
-    ): CachedHttpResult {
+    ): CachedHttpResult = withContext(Dispatchers.IO) {
         val nowMs = System.currentTimeMillis()
-        val cached = runCatching { dao?.getApiCache(cacheKey) }.getOrNull()
+        val cached = try { dao?.getApiCache(cacheKey) } catch (ce: CancellationException) { throw ce } catch (_: Exception) { null }
         if (cached != null && nowMs < cached.expiresAtEpochMs && cached.payloadJson.isNotBlank()) {
             val minsLeft = ((cached.expiresAtEpochMs - nowMs) / 60_000L).coerceAtLeast(1L)
             setStatus(provider, "Cached (${minsLeft}m TTL left)")
-            return CachedHttpResult(body = cached.payloadJson, fromCache = true)
+            return@withContext CachedHttpResult(body = cached.payloadJson, fromCache = true)
         }
 
-        val existingQuota = runCatching { dao?.getApiQuota(provider) }.getOrNull()
+        val existingQuota = quotaMutex.withLock { try { dao?.getApiQuota(provider) } catch (ce: CancellationException) { throw ce } catch (_: Exception) { null } }
         val sameWindow = existingQuota != null && existingQuota.windowKey == windowKey
         val usedInWindow = if (sameWindow) existingQuota!!.callsUsed else 0
         val serverRem = if (sameWindow) existingQuota!!.serverRemaining else null
@@ -139,11 +155,11 @@ class OptionalOddsAndDataClient(
         if (nowMs < cooldownUntil) {
             val mins = ((cooldownUntil - nowMs) / 60_000L).coerceAtLeast(1L)
             setStatus(provider, "Cooldown (${mins}m) · using cache")
-            return CachedHttpResult(body = cached?.payloadJson, fromCache = true)
+            return@withContext CachedHttpResult(body = cached?.payloadJson, fromCache = true)
         }
         if (usedInWindow >= hardLimit || (serverRem != null && serverRem <= 0)) {
             setStatus(provider, "Quota cap ($usedInWindow/$hardLimit) · cached")
-            return CachedHttpResult(body = cached?.payloadJson, fromCache = true)
+            return@withContext CachedHttpResult(body = cached?.payloadJson, fromCache = true)
         }
 
         if (!cached?.etag.isNullOrBlank()) {
@@ -152,7 +168,7 @@ class OptionalOddsAndDataClient(
         val req = requestBuilder.build()
         val httpClient = if (useAuthClient) authClient else client
 
-        return try {
+        try {
             incrementCalls(provider)
             httpClient.newCall(req).execute().use { response ->
                 val remainingStr = response.header("x-requests-remaining")
@@ -208,7 +224,9 @@ class OptionalOddsAndDataClient(
                     }
                     response.isSuccessful -> {
                         val body = readBoundedBody(response)
-                        if (body.isNotBlank()) {
+                        val isApiErrorPayload = body.contains("\"status\":\"failure\"", ignoreCase = true) ||
+                            (body.contains("\"errors\":{\"") && !body.contains("\"errors\":[]"))
+                        if (body.isNotBlank() && !isApiErrorPayload) {
                             runCatching {
                                 dao?.putApiCache(
                                     ApiResponseCacheEntity(
@@ -877,7 +895,7 @@ class OptionalOddsAndDataClient(
                 .get()
 
             val cachedRes = executeCachedGet(
-                cacheKey = "api_sports:${parsedUrl.host}:${parsedUrl.encodedPath}",
+                cacheKey = "api_sports:${parsedUrl.host}:${parsedUrl.encodedPath}?${parsedUrl.encodedQuery.orEmpty()}",
                 provider = PROVIDER_API_SPORTS,
                 requestBuilder = requestBuilder,
                 ttlMs = TTL_6_HOURS_MS,
@@ -904,6 +922,187 @@ class OptionalOddsAndDataClient(
         }
     }
 
+    suspend fun fetchManifoldSportsOdds(): List<Pair<String, Double>> {
+        return try {
+            val url = "https://api.manifold.markets/v0/search-markets?term=win&filter=open&sort=liquidity&limit=50"
+            val reqBuilder = Request.Builder().url(url).header("Accept", "application/json").get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "manifold:sports_open",
+                provider = PROVIDER_MANIFOLD,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_30_MIN_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 500,
+                useAuthClient = false,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            val parsed = parseManifoldMarketsPayload(body)
+            setStatus(PROVIDER_MANIFOLD, if (parsed.isNotEmpty()) "OK (${parsed.size} sports markets)" else "No active sports markets")
+            parsed
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_MANIFOLD, "Error: ${sanitizeError(e)}")
+            emptyList()
+        }
+    }
+
+    internal fun parseManifoldMarketsPayload(body: String): List<Pair<String, Double>> {
+        val arr = runCatching { json.parseToJsonElement(body) as? JsonArray }.getOrNull() ?: return emptyList()
+        val out = mutableListOf<Pair<String, Double>>()
+        for (elem in arr) {
+            val obj = elem as? JsonObject ?: continue
+            val q = obj.stringOrNull("question")?.trim().orEmpty()
+            if (q.isBlank() || !isSportsMarketQuestion(q)) continue
+            val prob = obj.doubleOrNull("probability")?.takeIf { it.isFinite() && it in 0.01..0.99 } ?: continue
+            out.add(q to prob)
+        }
+        return out.distinctBy { it.first.lowercase(Locale.US) }
+    }
+
+    suspend fun fetchBalldontlieNbaGames(apiKey: String): List<RawUpcomingEvent> {
+        val cleanKey = sanitizeKey(apiKey)
+        if (cleanKey.isBlank()) {
+            setStatus(PROVIDER_BALLDONTLIE, "Not configured")
+            return emptyList()
+        }
+        return try {
+            val today = LocalDate.now(ZoneOffset.UTC)
+            val url = "https://api.balldontlie.io/v1/games"
+                .toHttpUrl().newBuilder()
+                .addQueryParameter("start_date", today.toString())
+                .addQueryParameter("end_date", today.plusDays(6).toString())
+                .addQueryParameter("per_page", "50")
+                .build()
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("Authorization", cleanKey)
+                .header("Accept", "application/json")
+                .get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "balldontlie:nba:$today",
+                provider = PROVIDER_BALLDONTLIE,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 100,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: return emptyList()
+            val data = root.arrayOrNull("data") ?: return emptyList()
+            val out = mutableListOf<RawUpcomingEvent>()
+            for (elem in data) {
+                val g = elem as? JsonObject ?: continue
+                val status = g.stringOrNull("status").orEmpty()
+                if (status.equals("Final", ignoreCase = true)) continue
+                val id = g.stringOrNull("id") ?: continue
+                val home = CsvAndFeedParsers.normalizeTeam(g.objectOrNull("home_team")?.stringOrNull("full_name").orEmpty(), Sport.NBA)
+                val away = CsvAndFeedParsers.normalizeTeam(g.objectOrNull("visitor_team")?.stringOrNull("full_name").orEmpty(), Sport.NBA)
+                if (home.isBlank() || away.isBlank() || home == away) continue
+                val kickoff = g.stringOrNull("datetime")?.takeIf { it.isNotBlank() } ?: "${g.stringOrNull("date").orEmpty()}T00:00:00Z"
+                out.add(RawUpcomingEvent("bdl_$id", Sport.NBA, "NBA", "NBA", kickoff, home, away, null, emptyList()))
+            }
+            if (!cachedRes.fromCache) setStatus(PROVIDER_BALLDONTLIE, "OK (${out.size} NBA games)")
+            out
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_BALLDONTLIE, "Error: ${sanitizeError(e)}")
+            emptyList()
+        }
+    }
+
+    suspend fun fetchLiveTennisMatches(apiKey: String): List<RawUpcomingEvent> {
+        val cleanKey = sanitizeKey(apiKey)
+        if (cleanKey.isBlank()) {
+            setStatus(PROVIDER_LIVE_TENNIS, "Not configured")
+            return emptyList()
+        }
+        return try {
+            val today = LocalDate.now(ZoneOffset.UTC)
+            val url = "https://livetennisapi.com/api/v1/matches"
+                .toHttpUrl().newBuilder()
+                .addQueryParameter("date", today.toString())
+                .build()
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("X-API-Key", cleanKey)
+                .header("Accept", "application/json")
+                .get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "livetennis:$today",
+                provider = PROVIDER_LIVE_TENNIS,
+                requestBuilder = reqBuilder,
+                ttlMs = TTL_6_HOURS_MS,
+                windowKey = currentDailyWindow(),
+                hardLimit = 85,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return emptyList()
+            val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: return emptyList()
+            val matches = root.arrayOrNull("matches") ?: root.arrayOrNull("data") ?: return emptyList()
+            val out = mutableListOf<RawUpcomingEvent>()
+            for (elem in matches) {
+                val m = elem as? JsonObject ?: continue
+                val id = m.stringOrNull("id") ?: continue
+                val p1 = CsvAndFeedParsers.normalizeTeam(m.stringOrNull("player1").orEmpty(), Sport.TENNIS)
+                val p2 = CsvAndFeedParsers.normalizeTeam(m.stringOrNull("player2").orEmpty(), Sport.TENNIS)
+                if (p1.isBlank() || p2.isBlank() || p1 == p2) continue
+                val tourney = m.stringOrNull("tournament")?.takeIf { it.isNotBlank() } ?: "ATP / WTA Tour"
+                val kickoff = m.stringOrNull("startTime")?.takeIf { it.isNotBlank() } ?: "${today}T12:00:00Z"
+                val surface = m.stringOrNull("surface")?.takeIf { it.isNotBlank() } ?: "Hard"
+                out.add(RawUpcomingEvent("lta_$id", Sport.TENNIS, "tennis", tourney, kickoff, p1, p2, surface, emptyList()))
+            }
+            if (!cachedRes.fromCache) setStatus(PROVIDER_LIVE_TENNIS, "OK (${out.size} matches)")
+            out
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            setStatus(PROVIDER_LIVE_TENNIS, "Error: ${sanitizeError(e)}")
+            emptyList()
+        }
+    }
+
+    suspend fun fetchOpenWeatherByCoords(lat: Double, lon: Double, apiKey: String): Triple<Double, Double, Int>? {
+        val cleanKey = sanitizeKey(apiKey)
+        if (cleanKey.isBlank()) return null
+        return try {
+            val url = "https://api.openweathermap.org/data/2.5/weather"
+                .toHttpUrl().newBuilder()
+                .addQueryParameter("lat", String.format(Locale.US, "%.3f", lat))
+                .addQueryParameter("lon", String.format(Locale.US, "%.3f", lon))
+                .addQueryParameter("units", "metric")
+                .addQueryParameter("appid", cleanKey)
+                .build()
+            val reqBuilder = Request.Builder().url(url).header("Accept", "application/json").get()
+            val cachedRes = executeCachedGet(
+                cacheKey = "openweather:${String.format(Locale.US, "%.2f,%.2f", lat, lon)}",
+                provider = PROVIDER_OPENWEATHER,
+                requestBuilder = reqBuilder,
+                ttlMs = 3L * 3_600_000L,
+                windowKey = currentDailyWindow(),
+                hardLimit = 200,
+                useAuthClient = true,
+            )
+            val body = cachedRes.body.orEmpty()
+            if (body.isBlank()) return null
+            val root = runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: return null
+            val tempC = root.objectOrNull("main")?.doubleOrNull("temp") ?: return null
+            val windMs = root.objectOrNull("wind")?.doubleOrNull("speed") ?: 0.0
+            val rainMm = root.objectOrNull("rain")?.doubleOrNull("1h") ?: 0.0
+            val rainPct = if (rainMm > 0.0) 80 else if (root.objectOrNull("clouds")?.doubleOrNull("all")?.let { it >= 80 } == true) 35 else 10
+            Triple(tempC, windMs * 3.6, rainPct)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun getQuotaSummary(
         keys: UserApiKeys,
         persistedQuotas: List<ApiQuotaEntity> = emptyList(),
@@ -916,7 +1115,11 @@ class OptionalOddsAndDataClient(
             buildQuotaStatus(PROVIDER_CRICKET_DATA, "100/day (6h cache)", keys.cricketDataKey.isNotBlank(), byProvider[PROVIDER_CRICKET_DATA]),
             buildQuotaStatus(PROVIDER_API_SPORTS, "100/day (6h cache)", keys.apiSportsKey.isNotBlank(), byProvider[PROVIDER_API_SPORTS]),
             buildQuotaStatus(PROVIDER_POLYMARKET, "Keyless (public)", keys.enablePolymarket, byProvider[PROVIDER_POLYMARKET]),
+            buildQuotaStatus(PROVIDER_BALLDONTLIE, "Free tier (6h cache)", keys.balldontlieKey.isNotBlank(), byProvider[PROVIDER_BALLDONTLIE]),
+            buildQuotaStatus(PROVIDER_LIVE_TENNIS, "100/day (6h cache)", keys.liveTennisApiKey.isNotBlank(), byProvider[PROVIDER_LIVE_TENNIS]),
+            buildQuotaStatus(PROVIDER_OPENWEATHER, "1000/day (3h cache)", keys.openWeatherApiKey.isNotBlank(), byProvider[PROVIDER_OPENWEATHER]),
             buildQuotaStatus(PROVIDER_KALSHI, "Keyless (public)", keys.enableKalshi, byProvider[PROVIDER_KALSHI]),
+            buildQuotaStatus(PROVIDER_MANIFOLD, "Keyless (public)", keys.enableManifold, byProvider[PROVIDER_MANIFOLD]),
         )
     }
 
@@ -1061,7 +1264,10 @@ class OptionalOddsAndDataClient(
     }
 
     internal fun sanitizeError(e: Throwable): String {
-        val raw = e.message ?: e::class.simpleName ?: "Unknown error"
+        val raw = listOfNotNull(e.message, e.cause?.message)
+            .firstOrNull { it.isNotBlank() }
+            ?: e::class.simpleName
+            ?: "Unknown error"
         return raw.replace(SECRET_QUERY_REGEX, "$1=REDACTED").take(120)
     }
 
@@ -1079,6 +1285,10 @@ class OptionalOddsAndDataClient(
         const val PROVIDER_API_SPORTS = "API-Sports"
         const val PROVIDER_POLYMARKET = "Polymarket"
         const val PROVIDER_KALSHI = "Kalshi"
+        const val PROVIDER_MANIFOLD = "Manifold Markets"
+        const val PROVIDER_BALLDONTLIE = "Balldontlie.io"
+        const val PROVIDER_LIVE_TENNIS = "Live Tennis API"
+        const val PROVIDER_OPENWEATHER = "OpenWeatherMap"
         const val TTL_30_MIN_MS = 30L * 60_000L
         const val TTL_6_HOURS_MS = 6L * 3_600_000L
         private val KALSHI_SPORTS_SERIES = listOf(

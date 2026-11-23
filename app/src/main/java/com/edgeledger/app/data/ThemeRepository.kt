@@ -232,7 +232,7 @@ class ThemeAndPrefsRepository(context: Context) {
                 p[KEY_API_KEYS]?.let { raw ->
                     val decrypted = if (KeystoreAesGcm.isEncrypted(raw)) {
                         runCatching { KeystoreAesGcm.decrypt(raw) }
-                            .onFailure { Log.e("ThemeAndPrefsRepo", "Keystore decrypt failed", it) }
+                            .onFailure { Log.e("ThemeAndPrefsRepo", "Keystore decrypt failed", it); _persistenceError.value = "Encrypted API keys could not be unlocked; please re-enter them in Settings." }
                             .getOrNull()
                     } else {
                         raw

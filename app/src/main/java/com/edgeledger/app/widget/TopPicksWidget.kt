@@ -54,7 +54,7 @@ class TopPicksWidget : GlanceAppWidget() {
             val pick = fx.markets.topPicks.firstOrNull()
             val home = shortTeamName(fx.homeTeam)
             val away = shortTeamName(fx.awayTeam)
-            "$home vs $away · ${pick?.label ?: "View Match"} (${pick?.chancePct ?: 50}%)"
+            "$home vs $away · ${pick?.label ?: "View Match"} (${pick?.chancePct ?: 0}%)"
         }?.takeIf { it.isNotEmpty() }
             ?: listOf("Tap to open EdgeLedger & sync live picks")
 

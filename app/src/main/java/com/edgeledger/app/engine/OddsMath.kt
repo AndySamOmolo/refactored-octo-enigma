@@ -311,7 +311,10 @@ object OddsMath {
                 fraction = kellyFraction,
                 maxCap = safeCap,
             )
-            StakingMode.FLAT,
+            StakingMode.FLAT -> {
+                if (expectedValue(modelProb, decimalOdds) <= 0.0) 0.0
+                else (20.0 / bankroll.coerceAtLeast(1.0)).coerceIn(0.0, safeCap)
+            }
             StakingMode.PERCENT_BANKROLL -> {
                 if (!flatUnitPct.isFinite() || flatUnitPct <= 0.0 || expectedValue(modelProb, decimalOdds) <= 0.0) 0.0
                 else flatUnitPct.coerceIn(0.0, safeCap)
@@ -350,20 +353,23 @@ object OddsMath {
         val safeH = if (probHome.isFinite()) probHome.coerceIn(0.0, 1.0) else 0.0
         val safeA = if (probAway.isFinite()) probAway.coerceIn(0.0, 1.0) else 0.0
         val safeD = if (probDraw.isFinite()) probDraw.coerceIn(0.0, 1.0) else 0.0
-        val isTwoWayDnb = oddsDraw == null && safeD > 0.0
+        val isTwoWayDnb = !hasDrawOdds && safeD > 0.0
         val twoWaySum = safeH + safeA
         val effHomeProb = if (isTwoWayDnb && twoWaySum > EPSILON) safeH / twoWaySum else safeH
         val effAwayProb = if (isTwoWayDnb && twoWaySum > EPSILON) safeA / twoWaySum else safeA
+        // Unconditional DNB scale factor: draws push (0 return), so EV = (1 - pDraw) * conditionalEV
+        val dnbEvScale = if (isTwoWayDnb) (1.0 - safeD).coerceIn(0.0, 1.0) else 1.0
 
         fun evalSide(
             label: String,
             modelProb: Double,
             fairProb: Double,
             decimalOdds: Double,
+            evScale: Double = 1.0,
         ): SideValueEval {
             val safeProb = if (modelProb.isFinite()) modelProb.coerceIn(0.0, 1.0) else 0.0
             val safeOdds = if (decimalOdds.isFinite() && decimalOdds > 1.0) decimalOdds else 1.0
-            val ev = expectedValue(safeProb, safeOdds)
+            val ev = expectedValue(safeProb, safeOdds) * evScale
             val edgePctPoints = (safeProb - fairProb) * 100.0
             val stakeFraction = fractionalKelly(
                 modelProb = safeProb,
@@ -386,11 +392,11 @@ object OddsMath {
         }
 
         val results = mutableListOf<SideValueEval>()
-        results += evalSide(homeLabel, effHomeProb, devig.fairHome, oddsHome)
+        results += evalSide(homeLabel, effHomeProb, devig.fairHome, oddsHome, dnbEvScale)
         if (hasDrawOdds) {
             results += evalSide("Draw", safeD, devig.fairDraw, oddsDraw!!)
         }
-        results += evalSide(awayLabel, effAwayProb, devig.fairAway, oddsAway)
+        results += evalSide(awayLabel, effAwayProb, devig.fairAway, oddsAway, dnbEvScale)
         return results
     }
 

@@ -1,7 +1,6 @@
 package com.edgeledger.app
 
 import android.app.Application
-import android.util.Log
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.SvgDecoder

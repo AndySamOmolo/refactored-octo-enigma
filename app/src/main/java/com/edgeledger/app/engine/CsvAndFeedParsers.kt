@@ -66,7 +66,7 @@ object CsvAndFeedParsers {
         "ipswich" to "Ipswich Town",
         "ath madrid" to "Atletico Madrid",
         "atletico de madrid" to "Atletico Madrid",
-        "atlético madrid" to "Atletico Madrid",
+        "atletico madrid" to "Atletico Madrid",
         "ath bilbao" to "Athletic Club",
         "athletic bilbao" to "Athletic Club",
         "betis" to "Real Betis",
@@ -75,7 +75,7 @@ object CsvAndFeedParsers {
         "vallecano" to "Rayo Vallecano",
         "espanol" to "Espanyol",
         "bayern munich" to "Bayern Munich",
-        "bayern münchen" to "Bayern Munich",
+        "bayern munchen" to "Bayern Munich",
         "dortmund" to "Borussia Dortmund",
         "m'gladbach" to "Borussia Monchengladbach",
         "monchengladbach" to "Borussia Monchengladbach",
@@ -1027,7 +1027,7 @@ object CsvAndFeedParsers {
                 val power = (((elo - 1260.0) / 500.0) * 84.0 + 10.0).toInt().coerceIn(8, 97)
                 val teamId = teamObj.str("id").orEmpty()
                 val logo = if (teamId.isNotBlank()) "https://www.mlbstatic.com/team-logos/$teamId.svg" else null
-                out[name] = TeamProfile(
+                out[PredictionEngine.profileKey(Sport.MLB, name)] = TeamProfile(
                     team = name,
                     sport = Sport.MLB,
                     leagueId = "mlb",
@@ -1070,7 +1070,7 @@ object CsvAndFeedParsers {
             val norm = (pts / maxPts).coerceIn(0.0, 1.0)
             val elo = (1380.0 + norm * 320.0 + wins * 8.0).coerceIn(1320.0, 1780.0)
             val power = (35.0 + norm * 60.0).toInt().coerceIn(20, 97)
-            out[fullName] = TeamProfile(
+            out[PredictionEngine.profileKey(Sport.F1, fullName)] = TeamProfile(
                 team = fullName,
                 sport = Sport.F1,
                 leagueId = "f1",
@@ -1188,5 +1188,136 @@ object CsvAndFeedParsers {
             )
         }
         return out
+    }
+
+    /**
+     * Parses olbauday/FPL-Core-Insights live ClubElo mirror (data/2026-2027/teams.csv),
+     * auto-updated twice daily with zero API key.
+     */
+    fun parseFplCoreEloCsv(csvText: String): Map<String, Double> {
+        val lines = csvText.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
+        if (lines.size < 2) return emptyMap()
+        val header = parseCsvLine(lines.first()).map { it.trim().lowercase(Locale.ROOT).removePrefix("\uFEFF") }
+        val idxName = header.indexOfFirst { it == "name" || it == "team" || it == "club" }
+        val idxElo = header.indexOfFirst { it == "elo" || it == "club_elo" }
+        if (idxName < 0 || idxElo < 0) return emptyMap()
+        val out = linkedMapOf<String, Double>()
+        for (i in 1 until lines.size) {
+            val cols = parseCsvLine(lines[i])
+            if (cols.size <= maxOf(idxName, idxElo)) continue
+            val team = normalizeTeam(cols[idxName], Sport.FOOTBALL)
+            val elo = cols[idxElo].trim().toDoubleOrNull()?.takeIf { it.isFinite() && it in 1000.0..2600.0 } ?: continue
+            if (team.isNotBlank()) out[team] = elo
+        }
+        return out
+    }
+
+    /**
+     * Parses ESPN Soccer Standings (site.api.espn.com/apis/v2/sports/soccer/{league}/standings)
+     * into TeamProfile records keyed by PredictionEngine.profileKey(Sport.FOOTBALL, name).
+     */
+    fun parseEspnSoccerStandings(jsonText: String, leagueId: String): Map<String, TeamProfile> {
+        val root = runCatching { json.parseToJsonElement(jsonText) as? JsonObject }.getOrNull() ?: return emptyMap()
+        val out = linkedMapOf<String, TeamProfile>()
+        val children = root.arr("children") ?: return emptyMap()
+        for (chElem in children) {
+            val ch = chElem as? JsonObject ?: continue
+            val entries = ch.obj("standings")?.arr("entries") ?: continue
+            for (eElem in entries) {
+                val entry = eElem as? JsonObject ?: continue
+                val teamObj = entry.obj("team") ?: continue
+                val rawName = teamObj.str("displayName")?.takeIf { it.isNotBlank() }
+                    ?: teamObj.str("name").orEmpty()
+                val name = normalizeTeam(rawName, Sport.FOOTBALL)
+                if (name.isBlank()) continue
+                val stats = entry.arr("stats")?.mapNotNull { it as? JsonObject }.orEmpty()
+                fun statVal(vararg names: String): Double? =
+                    stats.firstOrNull { s -> names.any { it.equals(s.str("name"), ignoreCase = true) } }?.dbl("value")
+                val gp = (statVal("gamesPlayed") ?: 0.0).toInt().coerceAtLeast(1)
+                val wins = (statVal("wins") ?: 0.0).toInt()
+                val draws = (statVal("ties", "draws") ?: 0.0).toInt()
+                val losses = (statVal("losses") ?: 0.0).toInt()
+                val gf = statVal("pointsFor") ?: (gp * 1.4)
+                val ga = statVal("pointsAgainst") ?: (gp * 1.3)
+                val pts = statVal("points") ?: (wins * 3.0 + draws)
+                val ppg = (pts / gp).coerceIn(0.0, 3.0)
+                val gdPerGame = ((gf - ga) / gp).coerceIn(-3.0, 3.0)
+                val elo = (1380.0 + ppg * 105.0 + gdPerGame * 45.0).coerceIn(1240.0, 1820.0)
+                val power = (((elo - 1240.0) / 580.0) * 86.0 + 10.0).toInt().coerceIn(8, 97)
+                val logo = teamObj.arr("logos")?.firstOrNull()?.let { (it as? JsonObject)?.str("href") }
+                    ?.takeIf { it.startsWith("https://", ignoreCase = true) }
+                out[PredictionEngine.profileKey(Sport.FOOTBALL, name)] = TeamProfile(
+                    team = name,
+                    sport = Sport.FOOTBALL,
+                    leagueId = leagueId,
+                    elo = elo,
+                    powerScore = power,
+                    gamesPlayed = wins + draws + losses,
+                    wins = wins,
+                    draws = draws,
+                    losses = losses,
+                    winPct = ((wins.toDouble() / gp) * 100.0).coerceIn(1.0, 99.0),
+                    avgScored = (gf / gp).coerceIn(0.3, 4.5),
+                    avgConceded = (ga / gp).coerceIn(0.3, 4.5),
+                    logoUrl = logo,
+                )
+            }
+        }
+        return out
+    }
+
+    /**
+     * Parses OpenLigaDB matchday JSON (api.openligadb.de/getmatchdata/bl1),
+     * filtering matchResults by resultTypeID == 2 (full-time).
+     */
+    fun parseOpenLigaDbMatches(jsonText: String): Pair<List<HistoricalMatch>, List<RawUpcomingEvent>> {
+        val arr = runCatching { json.parseToJsonElement(jsonText) as? JsonArray }.getOrNull()
+            ?: return emptyList<HistoricalMatch>() to emptyList()
+        val history = mutableListOf<HistoricalMatch>()
+        val upcoming = mutableListOf<RawUpcomingEvent>()
+        for (elem in arr) {
+            val m = elem as? JsonObject ?: continue
+            val id = m.str("matchID")?.takeIf { it.isNotBlank() } ?: continue
+            val kickoff = m.str("matchDateTimeUTC")?.takeIf { it.isNotBlank() } ?: m.str("matchDateTime").orEmpty()
+            val home = normalizeTeam(m.obj("team1")?.str("teamName").orEmpty(), Sport.FOOTBALL)
+            val away = normalizeTeam(m.obj("team2")?.str("teamName").orEmpty(), Sport.FOOTBALL)
+            if (home.isBlank() || away.isBlank() || home == away) continue
+            val finished = m.bool("matchIsFinished") == true
+            if (finished) {
+                val ft = m.arr("matchResults")?.mapNotNull { it as? JsonObject }
+                    ?.firstOrNull { it.int("resultTypeID") == 2 }
+                val hg = ft?.int("pointsTeam1") ?: continue
+                val ag = ft.int("pointsTeam2") ?: continue
+                history.add(
+                    HistoricalMatch(
+                        id = "oldb_$id",
+                        sport = Sport.FOOTBALL,
+                        leagueId = "D1",
+                        dateIso = kickoff.take(10),
+                        homeTeam = home,
+                        awayTeam = away,
+                        homeScore = hg,
+                        awayScore = ag,
+                    )
+                )
+            } else {
+                upcoming.add(
+                    RawUpcomingEvent(
+                        id = "oldb_$id",
+                        sport = Sport.FOOTBALL,
+                        leagueId = "D1",
+                        leagueName = "Bundesliga",
+                        kickoffIso = kickoff,
+                        homeTeam = home,
+                        awayTeam = away,
+                        surface = null,
+                        bookOdds = emptyList(),
+                        homeLogoUrl = m.obj("team1")?.str("teamIconUrl")?.takeIf { it.startsWith("https://") },
+                        awayLogoUrl = m.obj("team2")?.str("teamIconUrl")?.takeIf { it.startsWith("https://") },
+                    )
+                )
+            }
+        }
+        return history to upcoming
     }
 }

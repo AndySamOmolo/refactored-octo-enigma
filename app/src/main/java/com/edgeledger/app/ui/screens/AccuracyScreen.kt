@@ -279,7 +279,7 @@ fun AccuracyScreen(app: EdgeLedgerApp) {
             } else {
                 item {
                     val totalGames = snapshot.trackRecords.sumOf { it.gamesTested }
-                    val avgSkill = snapshot.trackRecords.map { it.accuracyScore }.average().roundToInt()
+                    val avgSkill = if (totalGames > 0) (snapshot.trackRecords.sumOf { it.accuracyScore.toDouble() * it.gamesTested } / totalGames.toDouble()).roundToInt() else 0
                     val gradedTracks = snapshot.trackRecords.filter { it.hasGradedOdds }
                     val avgRoi = if (gradedTracks.isNotEmpty()) gradedTracks.map { it.simulatedProfitPct }.average() else null
                     Row(

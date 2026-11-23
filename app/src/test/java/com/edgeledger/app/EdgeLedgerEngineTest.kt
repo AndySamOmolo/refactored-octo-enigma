@@ -433,6 +433,15 @@ class EdgeLedgerEngineTest {
 
         val byDraw = GamesFilterSort.sortFixtures(listOf(fxHigh, fxLow), GameSortMode.DRAW_HIGH) { 50 to 50 }
         assertEquals("fx2", byDraw.first().id)
+
+        val byLeague = GamesFilterSort.sortFixtures(listOf(fxHigh, fxLow), GameSortMode.LEAGUE_AZ) { 50 to 50 }
+        assertEquals("fx2", byLeague.first().id) // La Liga before Premier League
+
+        val byLatest = GamesFilterSort.sortFixtures(listOf(fxHigh, fxLow), GameSortMode.KICKOFF_LATE) { 50 to 50 }
+        assertEquals("fx2", byLatest.first().id)
+
+        val byBttsNo = GamesFilterSort.sortFixtures(listOf(fxHigh, fxLow), GameSortMode.BTTS_NO_HIGH) { 50 to 50 }
+        assertEquals("fx2", byBttsNo.first().id)
     }
 
     @Test
@@ -489,14 +498,14 @@ class EdgeLedgerEngineTest {
         """.trimIndent()
         val f1Profiles = CsvAndFeedParsers.parseJolpicaF1Standings(jolpicaJson)
         assertEquals(2, f1Profiles.size)
-        assertTrue((f1Profiles["Max Verstappen"]?.powerScore ?: 0) > (f1Profiles["Lando Norris"]?.powerScore ?: 0))
+        assertTrue((f1Profiles[PredictionEngine.profileKey(Sport.F1, "Max Verstappen")]?.powerScore ?: 0) > (f1Profiles[PredictionEngine.profileKey(Sport.F1, "Lando Norris")]?.powerScore ?: 0))
 
         val mlbJson = """
             {"records":[{"teamRecords":[{"team":{"id":119,"name":"Los Angeles Dodgers"},"wins":98,"losses":64,"runsScored":842,"runsAllowed":686}]}]}
         """.trimIndent()
         val mlbProfiles = CsvAndFeedParsers.parseMlbStandings(mlbJson)
         assertEquals(1, mlbProfiles.size)
-        assertTrue((mlbProfiles["Los Angeles Dodgers"]?.elo ?: 0.0) > 1550.0)
+        assertTrue((mlbProfiles[PredictionEngine.profileKey(Sport.MLB, "Los Angeles Dodgers")]?.elo ?: 0.0) > 1550.0)
 
         val nhlJson = """
             {"gameWeek":[{"date":"2026-11-21","games":[
@@ -517,5 +526,124 @@ class EdgeLedgerEngineTest {
         val cricEvents = CsvAndFeedParsers.parseEspnCricinfoCurrent(cricJson)
         assertEquals(1, cricEvents.size)
         assertEquals("Australia", cricEvents[0].homeTeam)
+    }
+
+    @Test
+    fun v840AuditFixesVerifyF1H2hOnlyPropDedupAndUnconditionalDnbEv() {
+        // CRIT-03: F1 H2H-only branch must never treat championship points as match scores
+        val f1Home = com.edgeledger.app.model.TeamProfile(
+            team = "Max Verstappen", sport = Sport.F1, leagueId = "f1",
+            elo = 1720.0, powerScore = 95, gamesPlayed = 10, avgScored = 395.0, avgConceded = 0.0,
+        )
+        val f1Away = com.edgeledger.app.model.TeamProfile(
+            team = "Lando Norris", sport = Sport.F1, leagueId = "f1",
+            elo = 1660.0, powerScore = 85, gamesPlayed = 10, avgScored = 330.0, avgConceded = 0.0,
+        )
+        val f1Pred = PredictionEngine.predictAllMarkets(Sport.F1, "Max Verstappen", "Lando Norris", f1Home, f1Away)
+        assertEquals(0.0, f1Pred.projectedHome, 0.0001)
+        assertEquals(0.0, f1Pred.projectedAway, 0.0001)
+        assertEquals("", f1Pred.projectedScoreDisplay)
+        assertTrue(f1Pred.probHome > f1Pred.probAway)
+
+        // CRIT-05: Multi-category NBA star must not produce duplicate Points props
+        val multiCatLeaders = listOf(
+            LivePlayerEntry("Nikola Jokic", "C", "points", 29.5),
+            LivePlayerEntry("Nikola Jokic", "C", "rebounds", 12.8),
+            LivePlayerEntry("Nikola Jokic", "C", "assists", 9.6),
+            LivePlayerEntry("Jamal Murray", "PG", "points", 21.0),
+        )
+        val nbaProps = PlayerPropsEngine.generatePlayerProps(
+            sport = Sport.NBA,
+            homeTeam = "Denver Nuggets",
+            awayTeam = "Miami Heat",
+            projectedHomeScore = 116.0,
+            projectedAwayScore = 109.0,
+            homePower = 78,
+            awayPower = 65,
+            liveHomePlayers = multiCatLeaders,
+            liveAwayPlayers = emptyList(),
+        )
+        val jokicProps = nbaProps.filter { it.playerName == "Nikola Jokic" }
+        assertEquals(1, jokicProps.size)
+
+        // Unconditional DNB EV must be scaled by (1 - probDraw)
+        val sides = OddsMath.evaluateSides(
+            homeLabel = "Home",
+            awayLabel = "Away",
+            probHome = 0.45,
+            probDraw = 0.30,
+            probAway = 0.25,
+            oddsHome = 1.65,
+            oddsDraw = null,
+            oddsAway = 2.40,
+        )
+        val homeEval = sides.first { it.label == "Home" }
+        // Conditional pH = 0.45 / 0.70 = 0.642857; condEV = 0.642857*1.65 - 1 = 0.0607; unconditional EV = 0.0607 * 0.70 = 0.0425
+        assertTrue(homeEval.expectedValue in 0.038..0.047)
+    }
+
+    @Test
+    fun v850KeylessEloSoccerStandingsOpenLigaDbAndManifoldParseCleanly() {
+        val fplCsv = "id,name,elo\n1,Arsenal,1965.4\n2,Man City,1942.1\n"
+        val eloMap = CsvAndFeedParsers.parseFplCoreEloCsv(fplCsv)
+        assertEquals(2, eloMap.size)
+        assertTrue((eloMap["Arsenal"] ?: 0.0) > 1950.0)
+
+        val espnSocJson = """
+            {"children":[{"standings":{"entries":[
+                {"team":{"displayName":"Arsenal"},"stats":[
+                    {"name":"gamesPlayed","value":12},{"name":"wins","value":9},{"name":"ties","value":2},{"name":"losses","value":1},
+                    {"name":"pointsFor","value":26},{"name":"pointsAgainst","value":9},{"name":"points","value":29}
+                ]}
+            ]}}]}
+        """.trimIndent()
+        val socProfiles = CsvAndFeedParsers.parseEspnSoccerStandings(espnSocJson, "E0")
+        assertEquals(1, socProfiles.size)
+        assertTrue((socProfiles[PredictionEngine.profileKey(Sport.FOOTBALL, "Arsenal")]?.elo ?: 0.0) > 1600.0)
+
+        val oldbJson = """
+            [{"matchID":9901,"matchDateTimeUTC":"2026-11-22T14:30:00Z","matchIsFinished":true,
+              "team1":{"teamName":"FC Bayern München"},"team2":{"teamName":"Borussia Dortmund"},
+              "matchResults":[{"resultTypeID":1,"pointsTeam1":1,"pointsTeam2":0},{"resultTypeID":2,"pointsTeam1":3,"pointsTeam2":1}]}]
+        """.trimIndent()
+        val (h, u) = CsvAndFeedParsers.parseOpenLigaDbMatches(oldbJson)
+        assertEquals(1, h.size)
+        assertEquals(0, u.size)
+        assertEquals(3, h[0].homeScore)
+
+        val client = OptionalOddsAndDataClient(OkHttpClient())
+        val manifoldJson = """[{"question":"Will Arsenal win the Premier League?","probability":0.41}]"""
+        val mf = client.parseManifoldMarketsPayload(manifoldJson)
+        assertEquals(1, mf.size)
+        assertTrue(mf[0].second in 0.40..0.42)
+    }
+
+    @Test
+    fun v860SharpEngineConservationShrinkageMovAndHtFtCoherence() {
+        val nbaBlowoutMov = PredictionEngine.computeMovMultiplier(Sport.NBA, 20, 1700.0, 1400.0)
+        val nbaUpsetMov = PredictionEngine.computeMovMultiplier(Sport.NBA, 20, 1400.0, 1700.0)
+        assertTrue(nbaBlowoutMov in 0.8..2.35)
+        assertTrue(nbaUpsetMov > nbaBlowoutMov)
+
+        val pHome = com.edgeledger.app.model.TeamProfile(
+            team = "Arsenal", sport = Sport.FOOTBALL, leagueId = "E0",
+            elo = 1650.0, powerScore = 82, gamesPlayed = 15, avgScored = 2.0, avgConceded = 0.9,
+        )
+        val pAway = com.edgeledger.app.model.TeamProfile(
+            team = "Everton", sport = Sport.FOOTBALL, leagueId = "E0",
+            elo = 1480.0, powerScore = 48, gamesPlayed = 15, avgScored = 1.1, avgConceded = 1.5,
+        )
+        val unblended = PredictionEngine.predictAllMarkets(Sport.FOOTBALL, "Arsenal", "Everton", pHome, pAway, sharpMarketHomeProb = null, marketBlendWeight = 0.0)
+        val blended = PredictionEngine.predictAllMarkets(Sport.FOOTBALL, "Arsenal", "Everton", pHome, pAway, sharpMarketHomeProb = 0.78, marketBlendWeight = 0.35)
+        assertEquals(unblended.projectedHome + unblended.projectedAway, blended.projectedHome + blended.projectedAway, 0.05)
+
+        assertTrue(unblended.topHtFt.isNotEmpty())
+        assertTrue(unblended.topHtFt.first().second <= (unblended.probHome * 100.0).toInt() + 2)
+
+        val oneGame = listOf(
+            HistoricalMatch("g1", Sport.FOOTBALL, "E0", "2026-11-20", "SmallSample FC", "Other FC", 6, 0)
+        )
+        val shrunk = PredictionEngine.buildTeamProfiles(oneGame)[PredictionEngine.profileKey(Sport.FOOTBALL, "SmallSample FC")]!!
+        assertTrue(shrunk.avgScored in 1.8..2.6)
     }
 }

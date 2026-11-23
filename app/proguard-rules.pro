@@ -14,7 +14,9 @@
 }
 
 # Keep Room entities/DAOs, WorkManager workers, and Glance widget receivers
--keep class * extends androidx.room.RoomDatabase
+-keep class * extends androidx.room.RoomDatabase { <init>(); }
 -keep class com.edgeledger.app.data.WeeklySyncWorker { *; }
 -keep class com.edgeledger.app.widget.TopPicksWidget { *; }
 -keep class com.edgeledger.app.widget.TopPicksWidgetReceiver { *; }
+
+-keepnames @kotlinx.serialization.Serializable class com.edgeledger.app.**

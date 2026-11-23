@@ -42,7 +42,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -102,7 +101,6 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     val tokens = AppTheme.tokens
     val c = tokens.colors
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     val config by app.prefsRepo.theme.collectAsStateWithLifecycle()
     val savedThemes by app.prefsRepo.savedThemes.collectAsStateWithLifecycle()
@@ -125,11 +123,14 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     var importJsonText by remember { mutableStateOf("") }
     var statusMsg by remember { mutableStateOf<String?>(null) }
 
-    var oddsApiInput by remember(apiKeys.theOddsApiKey) { mutableStateOf(apiKeys.theOddsApiKey) }
-    var fdOrgInput by remember(apiKeys.footballDataOrgKey) { mutableStateOf(apiKeys.footballDataOrgKey) }
-    var oddsPapiInput by remember(apiKeys.oddsPapiKey) { mutableStateOf(apiKeys.oddsPapiKey) }
-    var cricketInput by remember(apiKeys.cricketDataKey) { mutableStateOf(apiKeys.cricketDataKey) }
-    var apiSportsInput by remember(apiKeys.apiSportsKey) { mutableStateOf(apiKeys.apiSportsKey) }
+    var oddsApiInput by rememberSaveable(apiKeys.theOddsApiKey) { mutableStateOf(apiKeys.theOddsApiKey) }
+    var fdOrgInput by rememberSaveable(apiKeys.footballDataOrgKey) { mutableStateOf(apiKeys.footballDataOrgKey) }
+    var oddsPapiInput by rememberSaveable(apiKeys.oddsPapiKey) { mutableStateOf(apiKeys.oddsPapiKey) }
+    var cricketInput by rememberSaveable(apiKeys.cricketDataKey) { mutableStateOf(apiKeys.cricketDataKey) }
+    var apiSportsInput by rememberSaveable(apiKeys.apiSportsKey) { mutableStateOf(apiKeys.apiSportsKey) }
+    var balldontlieInput by rememberSaveable(apiKeys.balldontlieKey) { mutableStateOf(apiKeys.balldontlieKey) }
+    var liveTennisInput by rememberSaveable(apiKeys.liveTennisApiKey) { mutableStateOf(apiKeys.liveTennisApiKey) }
+    var openWeatherInput by rememberSaveable(apiKeys.openWeatherApiKey) { mutableStateOf(apiKeys.openWeatherApiKey) }
 
     var balanceInput by remember(prefs.bankroll) { mutableStateOf(prefs.bankroll.toInt().toString()) }
     var paperInput by remember(prefs.paperBankroll) { mutableStateOf(prefs.paperBankroll.toInt().toString()) }
@@ -153,7 +154,7 @@ fun SettingsScreen(app: EdgeLedgerApp) {
     )
     val safeRoleIdx = activeColorRole.coerceIn(0, colorRoles.lastIndex)
     val activeHex = colorRoles[safeRoleIdx].second
-    var hexInput by remember(activeHex, safeRoleIdx) { mutableStateOf(activeHex) }
+    var hexInput by rememberSaveable(activeHex, safeRoleIdx) { mutableStateOf(activeHex) }
 
     fun updateActiveRoleHex(newHex: String) {
         app.prefsRepo.updateTheme { t ->
@@ -705,7 +706,10 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                         SettingsApiKeyField("Football-Data.org", "12 leagues · Official European football schedules & standings", fdOrgInput) { fdOrgInput = it }
                         SettingsApiKeyField("OddsPapi", "250 req/mo · Sharp exchange & bookmaker lines", oddsPapiInput) { oddsPapiInput = it }
                         SettingsApiKeyField("CricketData.org", "100 hits/day · Live IPL, T20, ODI & international cricket", cricketInput) { cricketInput = it }
-                        SettingsApiKeyField("API-Sports", "100 req/day · Optional extra stats & injuries", apiSportsInput) { apiSportsInput = it }
+                        SettingsApiKeyField("API-Sports", "100 req/day per sport · Football, NBA, NFL, NHL, MLB, F1, MMA", apiSportsInput) { apiSportsInput = it }
+                        SettingsApiKeyField("Balldontlie.io", "Free tier · NBA, NFL, MLB, NHL & EPL games & teams", balldontlieInput) { balldontlieInput = it }
+                        SettingsApiKeyField("Live Tennis API", "100 req/day · Live ATP & WTA fixtures, scores & rankings", liveTennisInput) { liveTennisInput = it }
+                        SettingsApiKeyField("OpenWeatherMap", "1,000 req/day · Stadium weather backup alongside Open-Meteo", openWeatherInput) { openWeatherInput = it }
 
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {
@@ -721,6 +725,13 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                             }
                             Switch(checked = apiKeys.enableKalshi, onCheckedChange = { v -> app.prefsRepo.updateApiKeys { it.copy(enableKalshi = v) } })
                         }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Manifold Sports Markets (Keyless)", color = c.text, fontWeight = FontWeight.Bold, fontSize = scaledSp(13f))
+                                Text("Free community prediction-market probabilities", color = c.textMuted, fontSize = scaledSp(11.5f))
+                            }
+                            Switch(checked = apiKeys.enableManifold, onCheckedChange = { v -> app.prefsRepo.updateApiKeys { it.copy(enableManifold = v) } })
+                        }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             Button(
@@ -732,6 +743,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                             oddsPapiKey = oddsPapiInput.trim(),
                                             cricketDataKey = cricketInput.trim(),
                                             apiSportsKey = apiSportsInput.trim(),
+                                            balldontlieKey = balldontlieInput.trim(),
+                                            liveTennisApiKey = liveTennisInput.trim(),
+                                            openWeatherApiKey = openWeatherInput.trim(),
                                         )
                                     }
                                     app.syncRepo.refreshQuotaSummary()
@@ -751,6 +765,9 @@ fun SettingsScreen(app: EdgeLedgerApp) {
                                             oddsPapiKey = oddsPapiInput.trim(),
                                             cricketDataKey = cricketInput.trim(),
                                             apiSportsKey = apiSportsInput.trim(),
+                                            balldontlieKey = balldontlieInput.trim(),
+                                            liveTennisApiKey = liveTennisInput.trim(),
+                                            openWeatherApiKey = openWeatherInput.trim(),
                                         )
                                     }
                                     statusMsg = "Keys saved! Syncing live feeds..."

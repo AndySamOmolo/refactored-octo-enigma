@@ -47,9 +47,10 @@ jobs:
         run: |
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             set -euo pipefail
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "${RUNNER_TEMP}/release.keystore"
+            printf "%s" "$ANDROID_KEYSTORE_BASE64" | tr -d "\r\n " | base64 --decode > "${RUNNER_TEMP}/release.keystore"
             chmod 600 "${RUNNER_TEMP}/release.keystore"
             echo "RELEASE_STORE_FILE=${RUNNER_TEMP}/release.keystore" >> "$GITHUB_ENV"
+            echo "REQUIRE_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
           else
             echo "::warning::ANDROID_KEYSTORE_BASE64 is not set. Using ephemeral debug keystore (in-place APK updates require setting ANDROID_KEYSTORE_BASE64/PASSWORD/ALIAS/KEY_PASSWORD secrets)."
           fi
@@ -77,6 +78,7 @@ jobs:
           fi
           cp "$APK_PATH" "dist/edgeledger-android-v${VERSION_NAME}.apk"
           cp "$APK_PATH" "dist/edgeledger-android-latest.apk"
+          if [ -f "app/build/outputs/mapping/release/mapping.txt" ]; then cp "app/build/outputs/mapping/release/mapping.txt" "dist/mapping-v${VERSION_NAME}.txt"; fi
           (cd dist && sha256sum "edgeledger-android-v${VERSION_NAME}.apk" > "edgeledger-android-v${VERSION_NAME}.apk.sha256")
           (cd dist && sha256sum "edgeledger-android-latest.apk" > "edgeledger-android-latest.apk.sha256")
           BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
@@ -94,7 +96,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           TAG="v${APP_VERSION}-build.${GITHUB_RUN_NUMBER}"
           echo "RELEASE_TAG=${TAG}" >> "$GITHUB_ENV"
-          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             git tag "$TAG"
             git push origin "refs/tags/${TAG}"
           fi
@@ -111,6 +113,7 @@ jobs:
             dist/edgeledger-android-v${{ env.APP_VERSION }}.apk.sha256
             dist/edgeledger-android-latest.apk
             dist/edgeledger-android-latest.apk.sha256
+            dist/mapping-v*.txt
 
       - name: Clean up temporary keystore
         if: always()

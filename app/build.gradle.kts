@@ -10,7 +10,6 @@ plugins {
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
-    arg("room.incremental", "true")
 }
 
 android {
@@ -22,8 +21,8 @@ android {
         minSdk = 26
         targetSdk = 35
         val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
-        versionCode = 80350 + ciRunNumber
-        versionName = "8.3.5"
+        versionCode = 806000 + ciRunNumber
+        versionName = "8.6.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -75,7 +74,7 @@ android {
 
     packaging {
         resources {
-            excludes += "/META-INF/LGPL2.1"
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
 

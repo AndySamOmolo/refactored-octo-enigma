@@ -8,7 +8,6 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -217,7 +216,7 @@ object PlayerPropsEngine {
             val isPts = p.statCategory.isBlank() || p.statCategory.contains("point", ignoreCase = true)
             val v = p.statValue?.takeIf { it.isFinite() } ?: 0.0
             (if (isPts) 1000.0 else 0.0) + v
-        }.take(3)
+        }.distinctBy { it.name.trim().lowercase(Locale.ROOT) }.take(3)
         val shares = listOf(0.23, 0.18, 0.14)
         val rawMeans = leaders.mapIndexed { idx, p ->
             val rawStat = p.statValue?.takeIf { it.isFinite() && it in 4.0..48.0 }

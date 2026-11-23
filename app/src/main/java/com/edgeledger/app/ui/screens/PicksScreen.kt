@@ -43,7 +43,6 @@ import com.edgeledger.app.theme.AppTheme
 import com.edgeledger.app.ui.components.MetricTile
 import com.edgeledger.app.ui.components.SectionCard
 import com.edgeledger.app.ui.components.StatusBadge
-import com.edgeledger.app.ui.components.SegmentedTabs
 import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.scaledSp
 import kotlinx.coroutines.launch
@@ -322,7 +321,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
                         OutlinedButton(
                             onClick = {
                                 closingInput.toDoubleOrNull()?.takeIf { it.isFinite() && it > 1.0 }?.let { v ->
-                                    scope.launch { app.database.dao().updateClosingOdds(bet.id, v) }
+                                    app.appScope.launch { app.database.dao().updateClosingOdds(bet.id, v) }
                                 }
                             },
                             shape = tokens.shapes.button,
@@ -426,7 +425,7 @@ fun PicksScreen(app: EdgeLedgerApp) {
                         val now = Instant.now()
                         val odds = parsedOdds ?: return@Button
                         val stake = parsedStake ?: return@Button
-                        scope.launch {
+                        app.appScope.launch {
                             app.database.dao().upsertBet(
                                 PersonalBetEntity(
                                     id = "manual-${UUID.randomUUID()}",

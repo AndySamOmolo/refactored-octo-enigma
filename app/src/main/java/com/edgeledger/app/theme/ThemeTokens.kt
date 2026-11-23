@@ -10,7 +10,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -271,7 +270,7 @@ object ThemePresets {
         accentHex = "#0369A1",
         winHex = "#15803D",
         drawHex = "#B45309",
-        lossHex = "#DC2626",
+        lossHex = "#B91C1C",
         pendingHex = "#64748B",
         oddsUpHex = "#047857",
         oddsDownHex = "#E11D48",
@@ -1034,7 +1033,7 @@ fun resolveTokens(
             borderStrong = Color(0xFFB6C2D4)
             textPrimary = Color(0xFF0F172A)
             textSecondary = Color(0xFF475569)
-            textMuted = Color(0xFF64748B)
+            textMuted = Color(0xFF475569)
         }
         ThemeMode.AMOLED -> {
             background = Color(0xFF000000)

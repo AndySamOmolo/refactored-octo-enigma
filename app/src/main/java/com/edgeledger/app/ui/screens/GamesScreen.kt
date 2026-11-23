@@ -51,7 +51,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -59,7 +58,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.edgeledger.app.EdgeLedgerApp
+import com.edgeledger.app.engine.OddsMath
 import com.edgeledger.app.engine.PredictionEngine
+import com.edgeledger.app.model.OddsDisplayFormat
 import com.edgeledger.app.model.ConfidenceLevel
 import com.edgeledger.app.model.MatchFixture
 import com.edgeledger.app.model.Sport
@@ -74,7 +75,6 @@ import com.edgeledger.app.ui.components.TokenPill
 import com.edgeledger.app.ui.components.formatLocalKickoff
 import com.edgeledger.app.ui.components.scaledSp
 import com.edgeledger.app.ui.components.shortTeamName
-import com.edgeledger.app.ui.components.tabularStyle
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
@@ -82,16 +82,20 @@ import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 enum class GameSortMode(val shortLabel: String, val fullLabel: String, val subtitle: String) {
     BEST_PICK("Best Pick %", "Best Pick %", "Highest model win probability first"),
-    KICKOFF("Kickoff", "Kickoff Time", "Soonest upcoming games first"),
-    BEST_VALUE("Best Value", "Best Value Edge", "Largest positive EV edge vs bookmakers"),
-    BTTS_HIGH("BTTS %", "Both Teams to Score (BTTS)", "Highest probability both teams score (Football)"),
+    LEAGUE_AZ("League A–Z", "League / Competition (A → Z)", "Grouped by league, then earliest kickoff"),
+    KICKOFF("Soonest", "Kickoff Time (Soonest)", "Earliest upcoming kickoff time first"),
+    KICKOFF_LATE("Latest", "Kickoff Time (Latest)", "Latest upcoming kickoff time first"),
+    BEST_VALUE("Best +EV", "Best Value (+EV)", "Largest positive expected value vs bookmakers"),
+    BTTS_HIGH("BTTS Yes %", "Both Teams to Score (Yes %)", "Highest probability both teams score (Football)"),
+    BTTS_NO_HIGH("BTTS No %", "Both Teams to Score (No %)", "Highest clean-sheet / BTTS No probability (Football)"),
     OVER_25_HIGH("Over 2.5 / High", "Over 2.5 Goals / High Scoring", "Highest Over 2.5 % or projected total score"),
     UNDER_25_HIGH("Under 2.5 / Low", "Under 2.5 Goals / Low Scoring", "Highest Under 2.5 % or lowest projected total"),
     DRAW_HIGH("Draw %", "Draw Probability", "Highest draw likelihood (3-way sports)"),
+    CORNERS_HIGH("Most Corners", "Most Corners (Football)", "Highest projected corners & Over 9.5 %"),
+    CARDS_HIGH("Most Cards", "Most Cards (Football)", "Highest projected cards & Over 3.5 %"),
     CLOSEST("Closest", "Closest Matchup", "Tightest odds & highest upset potential"),
     POWER_GAP("Mismatch", "Biggest Mismatch", "Largest team power rating gap"),
 }
@@ -103,12 +107,22 @@ internal object GamesFilterSort {
         powerLookup: (MatchFixture) -> Pair<Int, Int>,
     ): List<MatchFixture> = when (sortMode) {
         GameSortMode.BEST_PICK -> fixtures.sortedByDescending { it.markets.topPicks.firstOrNull()?.chancePct ?: 0 }
+        GameSortMode.LEAGUE_AZ -> fixtures.sortedWith(
+            compareBy<MatchFixture> { it.leagueName.lowercase(Locale.ROOT) }
+                .thenBy { it.kickoffIso }
+        )
         GameSortMode.KICKOFF -> fixtures.sortedBy { it.kickoffIso }
+        GameSortMode.KICKOFF_LATE -> fixtures.sortedByDescending { it.kickoffIso }
         GameSortMode.BEST_VALUE -> fixtures.sortedByDescending { it.bestValueEdgePct ?: Double.NEGATIVE_INFINITY }
         GameSortMode.BTTS_HIGH -> fixtures.sortedWith(
             compareByDescending<MatchFixture> { it.sport == Sport.FOOTBALL }
                 .thenByDescending { it.markets.bttsYesPct }
                 .thenByDescending { it.markets.over25Pct }
+        )
+        GameSortMode.BTTS_NO_HIGH -> fixtures.sortedWith(
+            compareByDescending<MatchFixture> { it.sport == Sport.FOOTBALL }
+                .thenByDescending { 100 - it.markets.bttsYesPct }
+                .thenByDescending { 100 - it.markets.over25Pct }
         )
         GameSortMode.OVER_25_HIGH -> fixtures.sortedWith(
             compareByDescending<MatchFixture> {
@@ -125,6 +139,16 @@ internal object GamesFilterSort {
         GameSortMode.DRAW_HIGH -> fixtures.sortedWith(
             compareByDescending<MatchFixture> { it.sport.hasDraw }
                 .thenByDescending { it.markets.probDraw }
+        )
+        GameSortMode.CORNERS_HIGH -> fixtures.sortedWith(
+            compareByDescending<MatchFixture> { it.sport == Sport.FOOTBALL }
+                .thenByDescending { it.markets.cornersOver95Pct }
+                .thenByDescending { it.markets.projectedCorners }
+        )
+        GameSortMode.CARDS_HIGH -> fixtures.sortedWith(
+            compareByDescending<MatchFixture> { it.sport == Sport.FOOTBALL }
+                .thenByDescending { it.markets.cardsOver35Pct }
+                .thenByDescending { it.markets.projectedCards }
         )
         GameSortMode.CLOSEST -> fixtures.sortedBy { abs(it.markets.probHome - it.markets.probAway) }
         GameSortMode.POWER_GAP -> fixtures.sortedByDescending { fx ->
@@ -168,7 +192,7 @@ fun GamesScreen(
     var showSortSheet by remember { mutableStateOf(false) }
 
     val daysOld = if (snapshot.lastSyncEpochMs <= 0L) 0L else ((Instant.now().toEpochMilli() - snapshot.lastSyncEpochMs) / 86_400_000L).coerceAtLeast(0L)
-    val todayLocal = remember { LocalDate.now(ZoneId.systemDefault()) }
+    val todayLocal = remember(snapshot.lastSyncEpochMs) { LocalDate.now(ZoneId.systemDefault()) }
 
     val sportCounts = remember(snapshot.fixtures) {
         snapshot.fixtures.groupingBy { it.sport }.eachCount()
@@ -438,7 +462,8 @@ fun GamesScreen(
                         isPinned = isPinned,
                         layoutMode = tokens.config.fixtureLayout,
                         highlightMarketMode = sortMode,
-                        onTogglePin = { app.prefsRepo.togglePinTeam(fx.homeTeam) },
+                        oddsFormat = prefs.oddsFormat,
+                        onTogglePin = { val target = if (fx.awayTeam in prefs.pinnedTeams && fx.homeTeam !in prefs.pinnedTeams) fx.awayTeam else fx.homeTeam; app.prefsRepo.togglePinTeam(target) },
                         onClick = { onOpenMatch(fx.id) },
                     )
                 }
@@ -532,7 +557,7 @@ fun GamesScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     TokenPill("★ Favorites (${prefs.pinnedTeams.size})", favoritesOnly, { favoritesOnly = !favoritesOnly }, activeColor = c.draw, activeContainer = c.drawDim)
-                    TokenPill("Strong Picks (≥65%)", strongOnly, { strongOnly = !strongOnly }, activeColor = c.win, activeContainer = c.winDim)
+                    TokenPill("Strong Picks (≥68%)", strongOnly, { strongOnly = !strongOnly }, activeColor = c.win, activeContainer = c.winDim)
                     TokenPill("Good Value (+EV)", valueOnly, { valueOnly = !valueOnly }, activeColor = c.valueHighlight, activeContainer = c.valueHighlightDim)
                     TokenPill("High BTTS (≥58%)", highBttsOnly, { highBttsOnly = !highBttsOnly }, activeColor = c.accent, activeContainer = c.accentDim)
                     TokenPill("Over 2.5 Goals (≥58%)", highOver25Only, { highOver25Only = !highOver25Only }, activeColor = c.accent, activeContainer = c.accentDim)
@@ -667,6 +692,7 @@ private fun FixtureCard(
     isPinned: Boolean,
     layoutMode: FixtureLayoutMode,
     highlightMarketMode: GameSortMode,
+    oddsFormat: OddsDisplayFormat,
     onTogglePin: () -> Unit,
     onClick: () -> Unit,
 ) {
@@ -851,7 +877,9 @@ private fun FixtureCard(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        StatusBadge("${topPick.confidence.label} Pick · ${topPick.chancePct}%", c.win, c.winDim)
+                        val fairDec = 100.0 / topPick.chancePct.coerceIn(5, 97).toDouble()
+                        val fairStr = OddsMath.formatOdds(fairDec, oddsFormat)
+                        StatusBadge("${topPick.confidence.label} · ${topPick.chancePct}% · Fair $fairStr", c.win, c.winDim)
                         Text(
                             if (fixture.playerProps.isNotEmpty()) "${fixture.playerProps.size} Props & Markets →" else "All Markets →",
                             color = c.accent,
@@ -868,7 +896,7 @@ private fun FixtureCard(
         if (fixture.bestValueLabel != null && fixture.bestValueEdgePct != null) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 StatusBadge(
-                    text = "Good Value: ${fixture.bestValueLabel} (+${String.format(Locale.US, "%.1f", fixture.bestValueEdgePct)}% edge)",
+                    text = "+EV Value: ${fixture.bestValueLabel} (+${String.format(Locale.US, "%.1f", fixture.bestValueEdgePct)}% EV)",
                     color = c.valueHighlight,
                     containerColor = c.valueHighlightDim,
                 )
