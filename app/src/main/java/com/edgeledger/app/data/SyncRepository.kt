@@ -1587,7 +1587,7 @@ class SyncRepository(
                 sport == Sport.NHL -> {
                     val url = "https://api-web.nhle.com/v1/roster/"
                         .toHttpUrl().newBuilder().addPathSegment(teamId).addPathSegment("current").build().toString()
-                    CsvAndFeedParsers.parseNhlRoster(fetchTextCached("roster_nhl_$abbr", url, ttlMs = 24L * 3_600_000L))
+                    CsvAndFeedParsers.parseNhlRoster(fetchTextCached("roster_nhl_$teamId", url, ttlMs = 24L * 3_600_000L))
                 }
                 else -> emptyList()
             }
