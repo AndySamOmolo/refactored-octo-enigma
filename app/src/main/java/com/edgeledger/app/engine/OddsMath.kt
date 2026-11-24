@@ -429,7 +429,7 @@ object OddsMath {
 
         val results = mutableListOf<SideValueEval>()
         results += evalSide(homeLabel, effHomeProb, devig.fairHome, oddsHome, dnbEvScale)
-        if (hasDrawOdds && oddsDraw != null) {
+        if (hasDrawOdds) {
             results += evalSide("Draw", safeD, devig.fairDraw, oddsDraw)
         }
         results += evalSide(awayLabel, effAwayProb, devig.fairAway, oddsAway, dnbEvScale)

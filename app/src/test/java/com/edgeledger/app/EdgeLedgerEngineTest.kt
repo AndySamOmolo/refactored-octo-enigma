@@ -760,7 +760,8 @@ class EdgeLedgerEngineTest {
         // New Sport enum verticals predict cleanly
         for (sp in listOf(Sport.RUGBY, Sport.AFL, Sport.ESPORTS, Sport.GOLF)) {
             val pred = PredictionEngine.predictAllMarkets(sp, "Team A", "Team B", null, null)
-            assertEquals(1.0, pred.probHome + pred.probAway, 0.02)
+            assertEquals(1.0, pred.probHome + pred.probDraw + pred.probAway, 1e-6)
+            if (sp.hasDraw) assertTrue(pred.probDraw > 0.0) else assertEquals(0.0, pred.probDraw, 1e-9)
             assertTrue(pred.topPicks.isNotEmpty())
         }
     }
